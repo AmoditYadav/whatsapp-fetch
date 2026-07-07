@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Exporter Dashboard</title>
+    <link rel="stylesheet" href="style.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="dashboard-container">
+        <header>
+            <h1><span class="gradient-text">WhatsApp</span> Exporter</h1>
+            <p>Your collected messages and media</p>
+        </header>
+        
+        <div class="controls">
+            <select id="group-filter">
+                <option value="all">All Groups</option>
+            </select>
+            <div class="stats">
+                <span id="msg-count">0</span> Messages
+            </div>
+        </div>
+
+        <main id="chat-container">
+            <!-- Messages injected here -->
+        </main>
+    </div>
+    
+    <script src="app.js"></script>
+</body>
+</html>
