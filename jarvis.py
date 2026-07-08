@@ -203,7 +203,8 @@ def generate_response(prompt, group_contexts):
         "2. Be extremely concise. Keep the summary limited to 2 or 3 short sentences per group.\n"
         "3. Write responses exactly as they should be spoken aloud. Do NOT use markdown, bullet points, or list numbers.\n"
         "4. Spell out acronyms so the Text-To-Speech engine pronounces them correctly.\n"
-        "5. If there is no new activity or the context is empty, politely let the user know."
+        "5. If there is no new activity or the context is empty, politely let the user know.\n"
+        "6. If a sender's name is just a long string of numbers (a phone number), DO NOT read the numbers. Refer to them as 'someone', 'a member', or 'a participant'."
     )
     user_prompt = f"The user asked: '{prompt}'.\n\nHere is the latest WhatsApp message context:\n{context_str}"
 
@@ -278,12 +279,17 @@ def run_jarvis():
             available_groups = get_all_groups()
             group_contexts = extract_groups_from_query(user_text, available_groups)
 
-            response_text = generate_response(user_text, group_contexts)
-            print(f"🤖 Jarvis: {response_text}")
-            
-            send_state("speaking", response_text)
-            speak(response_text)
-            send_state("idle", "AWAITING INPUT...")
+            try:
+                response_text = generate_response(user_text, group_contexts)
+                print(f"🤖 Jarvis: {response_text}")
+                
+                send_state("speaking", response_text)
+                speak(response_text)
+            except Exception as e:
+                print(f"❌ Error during processing: {e}")
+            finally:
+                # ALWAYS return to idle so the browser microphone unlocks
+                send_state("idle", "AWAITING INPUT...")
 
     except KeyboardInterrupt:
         print("\nFarewell, sir.")

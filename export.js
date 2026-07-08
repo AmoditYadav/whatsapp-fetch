@@ -42,7 +42,8 @@ process.on('unhandledRejection', (error) => {
         msg.includes('Protocol error') ||
         msg.includes('Session closed') ||
         msg.includes('Target closed') ||
-        msg.includes('Navigation failed');
+        msg.includes('Navigation failed') ||
+        msg.includes('addEventListener');
 
     if (isExpected) return;
     console.error('Unhandled Error:', error);
