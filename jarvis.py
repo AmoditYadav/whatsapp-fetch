@@ -2,36 +2,17 @@ import os
 import sys
 import time
 import wave
-import subprocess
 import requests
+import urllib.parse
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
-from google import genai
-from google.genai import types
-
-import urllib.parse
+from groq import Groq
 
 # ==========================================
 # CONFIGURATION
 # ==========================================
 NODE_API_URL = "http://localhost:3000/api/groups"
-
-def find_whisper():
-    """Finds either the new whisper-cli.exe or the deprecated main.exe."""
-    candidates = [
-        "./whisper.cpp/whisper-cli.exe",
-        "./whisper.cpp/main.exe",
-        "./whisper.cpp/whisper-cli",
-        "./whisper.cpp/main",
-        "whisper-cli.exe",
-        "whisper-cli",
-        "main.exe"
-    ]
-    for c in candidates:
-        if os.path.exists(c):
-            return c
-    return "./whisper.cpp/whisper-cli.exe"
 
 def find_piper():
     """Checks common directories for the piper binary."""
@@ -60,17 +41,15 @@ def find_piper_model():
             return c
     return "en_US-lessac-medium.onnx"
 
-WHISPER_PATH = find_whisper()
-WHISPER_MODEL = "models/ggml-large-v3-turbo.bin"
 PIPER_PATH = find_piper()
 PIPER_MODEL = find_piper_model()
 
-SAMPLE_RATE = 16000  # Whisper requires exactly 16000Hz mono
+SAMPLE_RATE = 16000  # Whisper API expects 16000Hz mono
 
-def load_gemini_key():
-    """Loads Gemini API key from environment or .env files."""
+def load_groq_key():
+    """Loads Groq API key from environment or .env files."""
     # Check environment variable first
-    key = os.environ.get("GEMINI_API_KEY")
+    key = os.environ.get("GROQ_API_KEY")
     if key:
         return key
     
@@ -81,7 +60,7 @@ def load_gemini_key():
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     for line in f:
-                        if line.strip().startswith("GEMINI_API_KEY="):
+                        if line.strip().startswith("GROQ_API_KEY="):
                             # Split on the first '=' and clean the value
                             val = line.split("=", 1)[1].strip()
                             return val.strip('"').strip("'")
@@ -89,14 +68,14 @@ def load_gemini_key():
                 print(f"⚠️  Could not read env file {path}: {e}")
     return None
 
-GEMINI_API_KEY = load_gemini_key()
-if not GEMINI_API_KEY:
-    print("❌ Error: GEMINI_API_KEY not found in environment or .env files.")
-    print("Please ensure your D:\\whatsapp-web.js\\.env file has a valid GEMINI_API_KEY=your_key")
+GROQ_API_KEY = load_groq_key()
+if not GROQ_API_KEY:
+    print("❌ Error: GROQ_API_KEY not found in environment or .env files.")
+    print("Please ensure your D:\\whatsapp-web.js\\.env file has a valid GROQ_API_KEY=your_key")
     sys.exit(1)
 
-# Initialize Gemini Client
-client = genai.Client(api_key=GEMINI_API_KEY)
+# Initialize Groq Client
+client = Groq(api_key=GROQ_API_KEY)
 
 def record_audio_keypress(filename):
     """
@@ -138,47 +117,19 @@ def record_audio_keypress(filename):
         wf.setframerate(SAMPLE_RATE)
         wf.writeframes(audio_np.tobytes())
 
-def clean_transcription(text):
-    if not text:
-        return None
-    lines = text.split("\n")
-    cleaned = []
-    for line in lines:
-        l = line.lower()
-        if "warning:" in l or "deprecation" in l or "github.com" in l or "please use" in l or "whisper-cli" in l:
-            continue
-        cleaned.append(line)
-    final_text = "\n".join(cleaned).strip()
-    return final_text if final_text else None
-
 def transcribe_audio(filename):
-    """Sends audio to local whisper.cpp for high-speed CPU transcription."""
-    print("⏳ Transcribing audio locally via Whisper.cpp...")
-    if not os.path.exists(WHISPER_PATH):
-        print(f"\n❌ Whisper binary not found at '{WHISPER_PATH}'")
-        print("   → Please compile whisper.cpp first. See jarvis_setup_guide.md for instructions.")
+    """Sends audio to Groq API for high-speed Whisper Large V3 Turbo transcription."""
+    print("⏳ Transcribing audio via Groq API (whisper-large-v3-turbo)...")
+    try:
+        with open(filename, "rb") as file:
+            transcription = client.audio.transcriptions.create(
+                model="whisper-large-v3-turbo",
+                file=file
+            )
+        return transcription.text.strip() or None
+    except Exception as e:
+        print(f"❌ Error during Groq transcription: {e}")
         return None
-    if not os.path.exists(WHISPER_MODEL):
-        print(f"\n❌ Whisper model not found at '{WHISPER_MODEL}'")
-        print("   → Download ggml-large-v3-turbo.bin into the 'models/' folder. See jarvis_setup_guide.md.")
-        return None
-
-    # Added "-t", "6" to utilize 6 CPU threads concurrently for faster CPU transcription
-    result = subprocess.run(
-        [WHISPER_PATH, "-m", WHISPER_MODEL, "-f", filename, "-nt", "-otxt", "-t", "6"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace"
-    )
-
-    # Whisper.cpp writes output to filename.txt when using -otxt
-    txt_filename = filename + ".txt"
-    if os.path.exists(txt_filename):
-        with open(txt_filename, "r", encoding="utf-8") as f:
-            transcription = f.read().strip()
-        os.remove(txt_filename)  # Cleanup
-        return clean_transcription(transcription)
-
-    # Fallback to stdout if -otxt didn't create a file
-    return clean_transcription(result.stdout.strip())
 
 def get_whatsapp_context(group_name):
     """Fetches the last 20 messages of the group from the Node.js API."""
@@ -219,8 +170,8 @@ def extract_group_name(transcription):
     return "design engineering"
 
 def generate_response(prompt, messages, group_name):
-    """Sends the context to Gemini to generate a spoken Jarvis summary."""
-    print("🧠 Querying Gemini API (gemini-2.5-flash-lite) for Jarvis response...")
+    """Sends the context to Groq (Llama 4 Scout) to generate a spoken Jarvis summary."""
+    print("🧠 Querying Groq API (meta-llama/llama-4-scout-17b-16e-instruct) for Jarvis response...")
     
     # Format the WhatsApp logs for the LLM
     context_str = ""
@@ -242,27 +193,19 @@ def generate_response(prompt, messages, group_name):
 
     user_prompt = f"The user asked: '{prompt}'.\nHere is the latest message history from the group '{group_name}':\n{context_str}"
 
-    # Retry loop to handle temporary 503 UNAVAILABLE errors gracefully
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            response = client.models.generate_content(
-                model='gemini-2.5-flash-lite',
-                contents=user_prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    temperature=0.7,
-                    max_output_tokens=150
-                )
-            )
-            return response.text
-        except Exception as e:
-            if attempt < max_retries - 1:
-                wait_time = (attempt + 1) * 1.5
-                print(f"⚠️  Gemini API error: {e}. Retrying in {wait_time}s (Attempt {attempt + 2}/{max_retries})...")
-                time.sleep(wait_time)
-            else:
-                return f"Apologies sir, I encountered a persistent error communicating with the Gemini 2.5 Flash-Lite API: {e}"
+    try:
+        completion = client.chat.completions.create(
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=0.7,
+            max_tokens=150
+        )
+        return completion.choices[0].message.content
+    except Exception as e:
+        return f"Apologies sir, I encountered an error communicating with the Groq API: {e}"
 
 def speak(text):
     """Sends text to Piper TTS for sub-second CPU speech synthesis, then plays it."""
@@ -310,7 +253,7 @@ def run_jarvis():
         user_text = transcribe_audio(input_wav)
 
         if not user_text:
-            print("⚠️  Could not transcribe audio (Whisper not set up or no speech detected). Skipping.")
+            print("⚠️  Could not transcribe audio. Skipping.")
             return
 
         print(f"➡️  You said: \"{user_text}\"")
