@@ -18,6 +18,19 @@ let TARGET_GROUPS = [];
 let isDisconnecting = false;
 const savedMessageIds = new Set(); // Prevent duplicate saves
 
+// Load existing message IDs to prevent duplicates on restart
+if (fs.existsSync(EXPORT_FILE)) {
+    const lines = fs.readFileSync(EXPORT_FILE, 'utf-8').split('\n');
+    for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+            const data = JSON.parse(line);
+            if (data.id) savedMessageIds.add(data.id);
+        } catch (e) {}
+    }
+    console.log(`[i] Loaded ${savedMessageIds.size} existing message IDs to prevent duplicate downloads.`);
+}
+
 // ==========================================
 // SUPPRESS EXPECTED DISCONNECT ERRORS
 // ==========================================
