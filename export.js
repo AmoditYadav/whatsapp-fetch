@@ -36,15 +36,34 @@ process.on('unhandledRejection', (error) => {
 });
 
 function killStaleBrowserLock() {
-    // On Windows, Chrome leaves a SingletonLock file if it was not closed cleanly.
-    // This prevents a new instance from starting. We delete it before launch.
-    const lockFile = path.join(__dirname, '.wwebjs_auth', 'session', 'SingletonLock');
-    const cookieLock = path.join(__dirname, '.wwebjs_auth', 'session', 'lockfile');
-    [lockFile, cookieLock].forEach((f) => {
+    const authDir = path.join(__dirname, '.wwebjs_auth');
+    const authDirEscaped = authDir.replace(/\\/g, '\\\\');
+
+    // Step 1: Kill any Chrome/Chromium process that is holding open our wwebjs_auth userDataDir.
+    // We use PowerShell to match by command-line argument, so we don't kill the user's real Chrome.
+    try {
+        const { execSync } = require('child_process');
+        const cmd = `powershell -Command "Get-WmiObject Win32_Process | Where-Object { $_.Name -like '*chrome*' -and $_.CommandLine -like '*wwebjs_auth*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"`;
+        execSync(cmd, { stdio: 'ignore' });
+        console.log('[i] Killed any stale browser processes from previous session.');
+    } catch (_) {
+        // WMI not available or no matching processes — safe to continue
+    }
+
+    // Step 2: Give the OS 1 second to release file handles before we start a new process
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+
+    // Step 3: Delete leftover lock files (belt-and-suspenders)
+    const lockFiles = [
+        path.join(authDir, 'session', 'SingletonLock'),
+        path.join(authDir, 'session', 'SingletonCookie'),
+        path.join(authDir, 'session', 'lockfile'),
+    ];
+    lockFiles.forEach((f) => {
         try {
             if (fs.existsSync(f)) {
                 fs.unlinkSync(f);
-                console.log(`[i] Removed stale browser lock: ${path.basename(f)}`);
+                console.log(`[i] Removed stale lock file: ${path.basename(f)}`);
             }
         } catch (_) {}
     });
