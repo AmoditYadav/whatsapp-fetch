@@ -242,22 +242,12 @@ def generate_response(prompt, messages, group_name):
 
     user_prompt = f"The user asked: '{prompt}'.\nHere is the latest message history from the group '{group_name}':\n{context_str}"
 
-    try:
-        response = client.models.generate_content(
-            model='gemini-2.5-flash-lite',
-            contents=user_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=0.7,
-                max_output_tokens=150  # Lowered output tokens to speed up generation time
-            )
-        )
-        return response.text
-    except Exception as e:
-        print(f"⚠️  gemini-2.5-flash-lite returned error: {e}. Trying fallback gemini-2.5-flash...")
+    # Retry loop to handle temporary 503 UNAVAILABLE errors gracefully
+    max_retries = 3
+    for attempt in range(max_retries):
         try:
             response = client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-2.5-flash-lite',
                 contents=user_prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=system_prompt,
@@ -266,8 +256,13 @@ def generate_response(prompt, messages, group_name):
                 )
             )
             return response.text
-        except Exception as fallback_err:
-            return f"Apologies sir, I encountered an error communicating with the Gemini API: {fallback_err}"
+        except Exception as e:
+            if attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 1.5
+                print(f"⚠️  Gemini API error: {e}. Retrying in {wait_time}s (Attempt {attempt + 2}/{max_retries})...")
+                time.sleep(wait_time)
+            else:
+                return f"Apologies sir, I encountered a persistent error communicating with the Gemini 2.5 Flash-Lite API: {e}"
 
 def speak(text):
     """Sends text to Piper TTS for sub-second CPU speech synthesis, then plays it."""
