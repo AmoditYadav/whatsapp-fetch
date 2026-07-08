@@ -2,158 +2,87 @@ import React, { useRef, useMemo } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 
-// 3D Simplex Noise by Stefan Gustavson / Ashima Arts
-const simplexNoiseGLSL = `
-vec4 permute(vec4 x){return mod(((x*34.0)+1.0)*x, 289.0);}
-vec4 taylorInvSqrt(vec4 r){return 1.79284291400159 - 0.85373472095314 * r;}
-
-float snoise(vec3 v){
-  const vec2  C = vec2(1.0/6.0, 1.0/3.0) ;
-  const vec4  D = vec4(0.0, 0.5, 1.0, 2.0);
-
-  vec3 i  = floor(v + dot(v, C.yyy) );
-  vec3 x0 =   v - i + dot(i, C.xxx) ;
-
-  vec3 g = step(x0.yzx, x0.xyz);
-  vec3 l = 1.0 - g;
-  vec3 i1 = min( g.xyz, l.zxy );
-  vec3 i2 = max( g.xyz, l.zxy );
-
-  vec3 x1 = x0 - i1 + 1.0 * C.xxx;
-  vec3 x2 = x0 - i2 + 2.0 * C.xxx;
-  vec3 x3 = x0 - D.yyy;
-
-  i = mod(i, 289.0 );
-  vec4 p = permute( permute( permute(
-             i.z + vec4(0.0, i1.z, i2.z, 1.0 ))
-           + i.y + vec4(0.0, i1.y, i2.y, 1.0 ))
-           + i.x + vec4(0.0, i1.x, i2.x, 1.0 ));
-
-  float n_ = 0.142857142857; // 1.0/7.0
-  vec3  ns = n_ * D.wyz - D.xzx;
-
-  vec4 j = p - 49.0 * floor(p * ns.z *ns.z);
-
-  vec4 x_ = floor(j * ns.z);
-  vec4 y_ = floor(j - 7.0 * x_ );
-
-  vec4 x = x_ *ns.x + ns.yyyy;
-  vec4 y = y_ *ns.x + ns.yyyy;
-  vec4 h = 1.0 - abs(x) - abs(y);
-
-  vec4 b0 = vec4( x.xy, y.xy );
-  vec4 b1 = vec4( x.zw, y.zw );
-
-  vec4 s0 = floor(b0)*2.0 + 1.0;
-  vec4 s1 = floor(b1)*2.0 + 1.0;
-  vec4 sh = -step(h, vec4(0.0));
-
-  vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy ;
-  vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww ;
-
-  vec3 p0 = vec3(a0.xy,h.x);
-  vec3 p1 = vec3(a0.zw,h.y);
-  vec3 p2 = vec3(a1.xy,h.z);
-  vec3 p3 = vec3(a1.zw,h.w);
-
-  vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2, p2), dot(p3,p3)));
-  p0 *= norm.x;
-  p1 *= norm.y;
-  p2 *= norm.z;
-  p3 *= norm.w;
-
-  vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
-  m = m * m;
-  return 42.0 * dot( m*m, vec4( dot(p0,x0), dot(p1,x1),
-                                dot(p2,x2), dot(p3,x3) ) );
-}
-`;
-
+// Lightweight vertex shader: sin/cos drift instead of Simplex noise
 const vertexShader = `
-${simplexNoiseGLSL}
-
-attribute vec3 aPos;
 attribute vec3 aColor;
+attribute float aSpeed;
+attribute float aOffset;
 
 varying vec3 vColor;
-varying float vState;
+varying float vAlpha;
 
 uniform float uTime;
-uniform float uState; // 0.0 = idle, 1.0 = listening, 2.0 = speaking
+uniform float uState;
 
 void main() {
     vColor = aColor;
-    vState = uState;
 
-    vec3 pos = aPos;
+    vec3 pos = position;
+    float t = uTime * aSpeed + aOffset;
 
-    // Dynamic state transitions
-    float noiseFreq = 1.5;
-    float noiseAmp = 0.12;
-    float pulse = 0.0;
-
+    float amp = 0.08;
     if (uState == 1.0) {
-        // Listening: Contract particles towards center, lower noise activity
-        pos *= 0.85;
-        noiseAmp = 0.06;
+        // Listening: tighten towards center
+        pos *= 0.82;
+        amp = 0.03;
     } else if (uState == 2.0) {
-        // Speaking: Expand noise, pulse rhythmically
-        noiseAmp = 0.28;
-        noiseFreq = 2.8;
-        pulse = sin(uTime * 10.0) * 0.14;
+        // Speaking: outward pulse
+        amp = 0.18;
+        float pulse = sin(uTime * 8.0) * 0.12;
+        pos += normalize(pos) * pulse;
     }
 
-    // Apply Curl-like Simplex Noise drift
-    vec3 noiseInput = pos * noiseFreq + vec3(0.0, 0.0, uTime * 0.4);
-    vec3 drift = vec3(
-        snoise(noiseInput),
-        snoise(noiseInput + vec3(12.3, 23.4, 34.5)),
-        snoise(noiseInput + vec3(45.6, 56.7, 67.8))
-    );
+    // Simple, cheap drift using sin/cos
+    pos.x += sin(t * 1.1) * amp;
+    pos.y += cos(t * 0.9) * amp;
+    pos.z += sin(t * 0.7 + 1.3) * amp;
 
-    // Apply radial pulsing and noise drift
-    pos += normalize(pos) * pulse;
-    pos += drift * noiseAmp;
-
-    // Apply slow global rotation
-    float angle = uTime * 0.04;
+    // Slow Y-axis rotation
+    float angle = uTime * 0.05;
     float c = cos(angle);
     float s = sin(angle);
-    mat2 rotY = mat2(c, -s, s, c);
-    pos.xz = rotY * pos.xz;
+    float nx = c * pos.x - s * pos.z;
+    float nz = s * pos.x + c * pos.z;
+    pos.x = nx;
+    pos.z = nz;
 
-    // Apply instanced transforms (scale/rotation of local triangular geometry)
-    vec4 localPos = instanceMatrix * vec4(position, 1.0);
-    vec4 mvPosition = modelViewMatrix * vec4(pos + localPos.xyz, 1.0);
+    // Fade out particles near the edge of the brain for organic look
+    float dist = length(position);
+    vAlpha = 1.0 - smoothstep(0.6, 1.2, dist);
 
+    vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+    gl_PointSize = (2.5 / -mvPosition.z) * 300.0;
     gl_Position = projectionMatrix * mvPosition;
 }
 `;
 
 const fragmentShader = `
 varying vec3 vColor;
-varying float vState;
+varying float vAlpha;
+
+uniform float uState;
 
 void main() {
-    vec3 color = vColor;
+    // Soft circular point shape
+    vec2 uv = gl_PointCoord - 0.5;
+    float r = length(uv);
+    if (r > 0.5) discard;
+    float alpha = vAlpha * (1.0 - smoothstep(0.3, 0.5, r));
 
-    if (vState == 1.0) {
-        // Listening: Heavy shift to Electric Iris (#8052ff)
-        vec3 iris = vec3(0.502, 0.322, 1.0);
-        color = mix(color, iris, 0.88);
+    vec3 color = vColor;
+    if (uState == 1.0) {
+        // Listening: fade to Electric Iris
+        color = mix(color, vec3(0.502, 0.322, 1.0), 0.85);
     }
 
-    gl_FragColor = vec4(color, 1.0);
+    gl_FragColor = vec4(color, alpha);
 }
 `;
 
-// Shaders for the ambient sparse background particles
 const ambientVertexShader = `
-${simplexNoiseGLSL}
-
-attribute vec3 aPos;
 attribute vec3 aColor;
-
+attribute float aSpeed;
+attribute float aOffset;
 varying vec3 vColor;
 
 uniform float uTime;
@@ -161,43 +90,39 @@ uniform float uTime;
 void main() {
     vColor = aColor;
 
-    vec3 pos = aPos;
+    vec3 pos = position;
+    float t = uTime * aSpeed * 0.4 + aOffset;
+    pos.x += sin(t) * 0.5;
+    pos.y += cos(t * 0.8) * 0.4;
+    pos.z += sin(t * 0.6 + 2.0) * 0.4;
 
-    // Slow, large-scale slow drift in space
-    vec3 noiseInput = pos * 0.3 + vec3(0.0, uTime * 0.1, 0.0);
-    vec3 drift = vec3(
-        snoise(noiseInput),
-        snoise(noiseInput + vec3(5.0, 10.0, 15.0)),
-        snoise(noiseInput + vec3(20.0, 25.0, 30.0))
-    );
-
-    pos += drift * 1.5;
-
-    vec4 localPos = instanceMatrix * vec4(position, 1.0);
-    vec4 mvPosition = modelViewMatrix * vec4(pos + localPos.xyz, 1.0);
-
+    vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+    gl_PointSize = (1.5 / -mvPosition.z) * 300.0;
     gl_Position = projectionMatrix * mvPosition;
 }
 `;
 
 const ambientFragmentShader = `
 varying vec3 vColor;
-
 void main() {
-    // Semi-transparent ambient particles for depth
-    gl_FragColor = vec4(vColor, 0.3);
+    vec2 uv = gl_PointCoord - 0.5;
+    if (length(uv) > 0.5) discard;
+    gl_FragColor = vec4(vColor, 0.25);
 }
 `;
 
 export default function BrainParticles({ agentState }) {
-    const mainCount = 65000;
-    const ambientCount = 3500;
+    const BRAIN_COUNT = 5000;
+    const AMBIENT_COUNT = 400;
 
-    const stateMap = {
-        idle: 0.0,
-        listening: 1.0,
-        speaking: 2.0
-    };
+    const stateMap = { idle: 0.0, listening: 1.0, speaking: 2.0 };
+
+    const palette = useMemo(() => [
+        new THREE.Color('#8052ff'),
+        new THREE.Color('#ffb829'),
+        new THREE.Color('#15846e'),
+        new THREE.Color('#ffffff'),
+    ], []);
 
     const uniforms = useMemo(() => ({
         uTime: { value: 0 },
@@ -208,137 +133,106 @@ export default function BrainParticles({ agentState }) {
         uTime: { value: 0 }
     }), []);
 
-    // Color Palette matching tokens
-    const palette = useMemo(() => [
-        new THREE.Color('#8052ff'), // Electric Iris
-        new THREE.Color('#ffb829'), // Saffron Spark
-        new THREE.Color('#15846e'), // Deep Verdant
-        new THREE.Color('#ffffff')  // Bone White
-    ], []);
+    // Generate brain-shaped point cloud (two lopsided ellipsoid hemispheres)
+    const brainGeo = useMemo(() => {
+        const positions = new Float32Array(BRAIN_COUNT * 3);
+        const colors    = new Float32Array(BRAIN_COUNT * 3);
+        const speeds    = new Float32Array(BRAIN_COUNT);
+        const offsets   = new Float32Array(BRAIN_COUNT);
 
-    // Generate main brain volume coordinates (two hemispheres + folds)
-    const [mainPositions, mainColors] = useMemo(() => {
-        const pos = new Float32Array(mainCount * 3);
-        const col = new Float32Array(mainCount * 3);
-
-        for (let i = 0; i < mainCount; i++) {
+        for (let i = 0; i < BRAIN_COUNT; i++) {
             const isLeft = Math.random() > 0.5;
-            const xSign = isLeft ? -1.0 : 1.0;
+            const cx = isLeft ? -0.5 : 0.5;
 
-            // Centers for left and right hemispheres
-            const cx = 0.52 * xSign;
-            const cy = 0.0;
-            const cz = 0.0;
+            // Rejection sampling to fill an ellipsoid
+            let px, py, pz, dist;
+            do {
+                px = (Math.random() * 2 - 1) * 0.72;
+                py = (Math.random() * 2 - 1) * 0.95;
+                pz = (Math.random() * 2 - 1) * 0.72;
+                dist = (px / 0.72) ** 2 + (py / 0.95) ** 2 + (pz / 0.72) ** 2;
+            } while (dist > 1.0);
 
-            const u = Math.random() * Math.PI * 2;
-            const v = Math.random() * Math.PI;
-            // Bias density towards the center for organic structure
-            const r = 0.35 + 0.65 * Math.pow(Math.random(), 3.0);
+            // Slight fold pattern (cheap)
+            const fold = Math.sin(px * 8) * Math.sin(py * 8) * 0.04;
 
-            // Ellipsoid dimensions
-            const rx = 0.72;
-            const ry = 0.95;
-            const rz = 0.72;
+            positions[i * 3]     = cx + px + fold;
+            positions[i * 3 + 1] = py + fold;
+            positions[i * 3 + 2] = pz + fold;
 
-            let px = cx + rx * r * Math.sin(v) * Math.cos(u);
-            let py = cy + ry * r * Math.sin(v) * Math.sin(u);
-            let pz = cz + rz * r * Math.cos(v);
+            const c = palette[Math.floor(Math.random() * palette.length)];
+            colors[i * 3]     = c.r;
+            colors[i * 3 + 1] = c.g;
+            colors[i * 3 + 2] = c.b;
 
-            // Add folds (sulci/gyri pattern)
-            const foldPattern = Math.sin(px * 11.0) * Math.sin(py * 11.0) * Math.sin(pz * 11.0) * 0.07;
-            px += foldPattern;
-            py += foldPattern;
-            pz += foldPattern;
-
-            pos[i * 3] = px;
-            pos[i * 3 + 1] = py;
-            pos[i * 3 + 2] = pz;
-
-            // Colors
-            const color = palette[Math.floor(Math.random() * palette.length)];
-            col[i * 3] = color.r;
-            col[i * 3 + 1] = color.g;
-            col[i * 3 + 2] = color.b;
+            speeds[i]  = 0.4 + Math.random() * 0.6;
+            offsets[i] = Math.random() * Math.PI * 2;
         }
-        return [pos, col];
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geo.setAttribute('aColor',   new THREE.BufferAttribute(colors, 3));
+        geo.setAttribute('aSpeed',   new THREE.BufferAttribute(speeds, 1));
+        geo.setAttribute('aOffset',  new THREE.BufferAttribute(offsets, 1));
+        return geo;
     }, [palette]);
 
-    // Generate sparse ambient field coordinates
-    const [ambientPositions, ambientColors] = useMemo(() => {
-        const pos = new Float32Array(ambientCount * 3);
-        const col = new Float32Array(ambientCount * 3);
+    const ambientGeo = useMemo(() => {
+        const positions = new Float32Array(AMBIENT_COUNT * 3);
+        const colors    = new Float32Array(AMBIENT_COUNT * 3);
+        const speeds    = new Float32Array(AMBIENT_COUNT);
+        const offsets   = new Float32Array(AMBIENT_COUNT);
 
-        for (let i = 0; i < ambientCount; i++) {
-            // Scattered throughout a wide viewport volume
-            pos[i * 3] = (Math.random() - 0.5) * 16.0;
-            pos[i * 3 + 1] = (Math.random() - 0.5) * 10.0;
-            pos[i * 3 + 2] = (Math.random() - 0.5) * 12.0;
+        for (let i = 0; i < AMBIENT_COUNT; i++) {
+            positions[i * 3]     = (Math.random() - 0.5) * 14;
+            positions[i * 3 + 1] = (Math.random() - 0.5) * 8;
+            positions[i * 3 + 2] = (Math.random() - 0.5) * 10;
 
-            // Pick randomly from palette
-            const color = palette[Math.floor(Math.random() * palette.length)];
-            col[i * 3] = color.r;
-            col[i * 3 + 1] = color.g;
-            col[i * 3 + 2] = color.b;
+            const c = palette[Math.floor(Math.random() * palette.length)];
+            colors[i * 3]     = c.r;
+            colors[i * 3 + 1] = c.g;
+            colors[i * 3 + 2] = c.b;
+
+            speeds[i]  = 0.2 + Math.random() * 0.4;
+            offsets[i] = Math.random() * Math.PI * 2;
         }
-        return [pos, col];
-    }, [palette]);
 
-    // Apply instance matrix transforms for particles
-    const mainMeshRef = useRef();
-    const ambientMeshRef = useRef();
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geo.setAttribute('aColor',   new THREE.BufferAttribute(colors, 3));
+        geo.setAttribute('aSpeed',   new THREE.BufferAttribute(speeds, 1));
+        geo.setAttribute('aOffset',  new THREE.BufferAttribute(offsets, 1));
+        return geo;
+    }, [palette]);
 
     useFrame((state) => {
-        const elapsed = state.clock.getElapsedTime();
-        uniforms.uTime.value = elapsed;
+        const t = state.clock.getElapsedTime();
+        uniforms.uTime.value  = t;
         uniforms.uState.value = stateMap[agentState] ?? 0.0;
-        ambientUniforms.uTime.value = elapsed;
+        ambientUniforms.uTime.value = t;
     });
 
     return (
         <group>
-            {/* The main brain structure */}
-            <instancedMesh ref={mainMeshRef} args={[null, null, mainCount]}>
-                <tetrahedronGeometry args={[0.012]}>
-                    <instancedBufferAttribute
-                        attach="attributes-aPos"
-                        args={[mainPositions, 3]}
-                    />
-                    <instancedBufferAttribute
-                        attach="attributes-aColor"
-                        args={[mainColors, 3]}
-                    />
-                </tetrahedronGeometry>
+            <points geometry={brainGeo}>
                 <shaderMaterial
                     vertexShader={vertexShader}
                     fragmentShader={fragmentShader}
                     uniforms={uniforms}
-                    wireframe={true}
+                    transparent
                     depthWrite={false}
-                    transparent={true}
                 />
-            </instancedMesh>
+            </points>
 
-            {/* Sparse ambient background field */}
-            <instancedMesh ref={ambientMeshRef} args={[null, null, ambientCount]}>
-                <tetrahedronGeometry args={[0.025]}>
-                    <instancedBufferAttribute
-                        attach="attributes-aPos"
-                        args={[ambientPositions, 3]}
-                    />
-                    <instancedBufferAttribute
-                        attach="attributes-aColor"
-                        args={[ambientColors, 3]}
-                    />
-                </tetrahedronGeometry>
+            <points geometry={ambientGeo}>
                 <shaderMaterial
                     vertexShader={ambientVertexShader}
                     fragmentShader={ambientFragmentShader}
                     uniforms={ambientUniforms}
-                    wireframe={true}
+                    transparent
                     depthWrite={false}
-                    transparent={true}
                 />
-            </instancedMesh>
+            </points>
         </group>
     );
 }

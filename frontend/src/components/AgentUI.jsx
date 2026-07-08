@@ -72,7 +72,10 @@ export default function AgentUI() {
             <div className="absolute inset-0 w-full h-full z-0">
                 <Canvas
                     camera={{ position: [0, 0, 3.2], fov: 45 }}
-                    gl={{ antialias: true, alpha: false }}
+                    gl={{ antialias: false, alpha: false, powerPreference: 'low-power' }}
+                    dpr={1}
+                    frameloop="always"
+                    performance={{ min: 0.5 }}
                     onCreated={({ gl }) => {
                         gl.setClearColor('#000000', 1.0);
                     }}
