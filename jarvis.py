@@ -10,16 +10,60 @@ import soundfile as sf
 from google import genai
 from google.genai import types
 
+import urllib.parse
+
 # ==========================================
 # CONFIGURATION
 # ==========================================
 NODE_API_URL = "http://localhost:3000/api/groups"
 
-# Paths to your local binaries
-WHISPER_PATH = "./whisper.cpp/main.exe"  # Or "./whisper.cpp/main" on Linux/macOS
+def find_whisper():
+    """Finds either the new whisper-cli.exe or the deprecated main.exe."""
+    candidates = [
+        "./whisper.cpp/whisper-cli.exe",
+        "./whisper.cpp/main.exe",
+        "./whisper.cpp/whisper-cli",
+        "./whisper.cpp/main",
+        "whisper-cli.exe",
+        "whisper-cli",
+        "main.exe"
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return "./whisper.cpp/whisper-cli.exe"
+
+def find_piper():
+    """Checks common directories for the piper binary."""
+    candidates = [
+        "piper.exe",
+        "piper/piper.exe",
+        "piper_windows_amd64/piper/piper.exe",
+        "../piper.exe",
+        "piper"
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return "piper.exe"
+
+def find_piper_model():
+    """Checks common directories for the en_US-lessac-medium.onnx model."""
+    candidates = [
+        "en_US-lessac-medium.onnx",
+        "piper/en_US-lessac-medium.onnx",
+        "piper_windows_amd64/piper/en_US-lessac-medium.onnx",
+        "../en_US-lessac-medium.onnx"
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return "en_US-lessac-medium.onnx"
+
+WHISPER_PATH = find_whisper()
 WHISPER_MODEL = "models/ggml-large-v3-turbo.bin"
-PIPER_PATH = "piper.exe"                # Or "piper" on Linux/macOS
-PIPER_MODEL = "en_US-lessac-medium.onnx"
+PIPER_PATH = find_piper()
+PIPER_MODEL = find_piper_model()
 
 SAMPLE_RATE = 16000  # Whisper requires exactly 16000Hz mono
 
@@ -94,6 +138,19 @@ def record_audio_keypress(filename):
         wf.setframerate(SAMPLE_RATE)
         wf.writeframes(audio_np.tobytes())
 
+def clean_transcription(text):
+    if not text:
+        return None
+    lines = text.split("\n")
+    cleaned = []
+    for line in lines:
+        l = line.lower()
+        if "warning:" in l or "deprecation" in l or "github.com" in l or "please use" in l or "whisper-cli" in l:
+            continue
+        cleaned.append(line)
+    final_text = "\n".join(cleaned).strip()
+    return final_text if final_text else None
+
 def transcribe_audio(filename):
     """Sends audio to local whisper.cpp for high-speed CPU transcription."""
     print("⏳ Transcribing audio locally via Whisper.cpp...")
@@ -117,16 +174,17 @@ def transcribe_audio(filename):
         with open(txt_filename, "r", encoding="utf-8") as f:
             transcription = f.read().strip()
         os.remove(txt_filename)  # Cleanup
-        return transcription
+        return clean_transcription(transcription)
 
     # Fallback to stdout if -otxt didn't create a file
-    return result.stdout.strip() or None
+    return clean_transcription(result.stdout.strip())
 
 def get_whatsapp_context(group_name):
     """Fetches the last 20 messages of the group from the Node.js API."""
-    print(f"📥 Pulling context for group: '{group_name}' from dashboard...")
+    encoded_group = urllib.parse.quote(group_name)
+    print(f"📥 Pulling context for group: '{group_name}' (encoded: '{encoded_group}') from dashboard...")
     try:
-        url = f"{NODE_API_URL}/{group_name}/latest"
+        url = f"{NODE_API_URL}/{encoded_group}/latest"
         response = requests.get(url, timeout=5)
         if response.status_code == 200:
             messages = response.json().get('messages', [])
@@ -195,7 +253,20 @@ def generate_response(prompt, messages, group_name):
         )
         return response.text
     except Exception as e:
-        return f"Apologies sir, I encountered an error communicating with the Gemini server: {e}"
+        print(f"⚠️  gemini-2.5-flash-lite returned error: {e}. Trying fallback gemini-1.5-flash...")
+        try:
+            response = client.models.generate_content(
+                model='gemini-1.5-flash',
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    temperature=0.7,
+                    max_output_tokens=300
+                )
+            )
+            return response.text
+        except Exception as fallback_err:
+            return f"Apologies sir, I encountered an error communicating with the Gemini API: {fallback_err}"
 
 def speak(text):
     """Sends text to Piper TTS for sub-second CPU speech synthesis, then plays it."""

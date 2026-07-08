@@ -16,6 +16,7 @@ app.use('/media', express.static(path.join(DATA_DIR, 'media')));
 
 // API endpoint to fetch all messages
 app.get('/api/messages', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
     const messages = [];
     if (!fs.existsSync(EXPORT_FILE)) {
         return res.json([]);
@@ -44,6 +45,7 @@ app.get('/api/messages', (req, res) => {
 
 // API endpoint to fetch the latest 20 messages for a specific group
 app.get('/api/groups/:name/latest', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
     const groupName = req.params.name.toLowerCase().trim();
     const messages = [];
     if (!fs.existsSync(EXPORT_FILE)) {
