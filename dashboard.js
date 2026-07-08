@@ -79,6 +79,35 @@ app.get('/api/groups/:name/latest', (req, res) => {
     });
 });
 
+// SSE connection pool for real-time Jarvis states and captions
+let sseClients = [];
+
+app.get('/api/jarvis/stream', (req, res) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.flushHeaders();
+
+    sseClients.push(res);
+
+    req.on('close', () => {
+        sseClients = sseClients.filter(c => c !== res);
+    });
+});
+
+app.post('/api/jarvis/state', express.json(), (req, res) => {
+    const { state, caption } = req.body;
+    
+    // Broadcast state/caption update to all connected SSE clients
+    const payload = JSON.stringify({ state, caption });
+    sseClients.forEach(c => {
+        c.write(`data: ${payload}\n\n`);
+    });
+    
+    res.sendStatus(200);
+});
+
 app.listen(PORT, () => {
     console.log(`\n==============================================`);
     console.log(` Dashboard is live at: http://localhost:${PORT}`);

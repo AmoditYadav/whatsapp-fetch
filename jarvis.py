@@ -73,6 +73,13 @@ if not GROQ_API_KEY:
 
 client = Groq(api_key=GROQ_API_KEY)
 
+def send_state(state, caption=""):
+    """Sends the current agent state and caption to the Node dashboard server."""
+    try:
+        requests.post("http://localhost:3000/api/jarvis/state", json={"state": state, "caption": caption}, timeout=0.5)
+    except Exception:
+        pass
+
 # ==========================================
 # GROUP MANAGEMENT — reads directly from file
 # ==========================================
@@ -270,6 +277,7 @@ def generate_response(prompt, group_contexts):
 def record_audio_keypress(filename):
     """Records audio. Press ENTER to start, ENTER again to stop."""
     input("\n🎙️  Press [ENTER] to start recording...")
+    send_state("listening")
     print("🔴 Recording... Press [ENTER] again to stop.")
 
     stop_event = threading.Event()
@@ -285,7 +293,8 @@ def record_audio_keypress(filename):
     stop_event.set()
     stream.stop()
     stream.close()
-
+    
+    send_state("idle")
     print("🛑 Recording stopped. Saving audio...")
 
     if not audio_chunks:
@@ -381,7 +390,11 @@ def run_jarvis():
 
         response_text = generate_response(user_text, group_contexts)
         print(f"🤖 Jarvis: {response_text}")
+        
+        # Trigger WebGL visualizer state to speaking with active speech text, then reset to idle
+        send_state("speaking", response_text)
         speak(response_text)
+        send_state("idle")
 
     finally:
         if os.path.exists(input_wav):

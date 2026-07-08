@@ -99,29 +99,17 @@ function startClient() {
             const chats = await client.getChats();
             const allGroups = chats.filter((c) => c.isGroup);
 
-            // --- Show ALL available groups for debugging ---
             console.log('\n📋 All groups found on your WhatsApp:');
             allGroups.forEach((g, i) => console.log(`   [${i + 1}] "${g.name}"`));
             console.log('');
 
-            // --- Case-insensitive matching so typos don't break things ---
-            const targetGroupsLower = TARGET_GROUPS.map((g) => g.toLowerCase().trim());
-            const targetChats = allGroups.filter((chat) =>
-                targetGroupsLower.includes(chat.name.toLowerCase().trim())
-            );
-
-            if (targetChats.length === 0) {
-                console.log('⚠️  WARNING: None of your target groups matched any WhatsApp group!');
-                console.log('   You entered:', TARGET_GROUPS);
-                console.log('   Check the list above and make sure the name matches exactly (case-insensitive).');
-                console.log('\n   Still listening for new messages in case names change...');
+            if (allGroups.length === 0) {
+                console.log('⚠️  No WhatsApp groups found on this account!');
             } else {
-                console.log(`✅ Matched ${targetChats.length} group(s):`);
-                targetChats.forEach((c) => console.log(`   - "${c.name}"`));
-                console.log('');
+                console.log(`✅ Exporting history for all ${allGroups.length} group(s):`);
 
-                // Fetch history for all matched groups concurrently (at once)
-                await Promise.all(targetChats.map(async (chat) => {
+                // Fetch history for all groups concurrently (at once)
+                await Promise.all(allGroups.map(async (chat) => {
                     console.log(`⏳ Fetching history for: "${chat.name}"...`);
                     try {
                         const messages = await chat.fetchMessages({ limit: 1000 });
@@ -150,8 +138,7 @@ function startClient() {
     client.on('message', async (msg) => {
         try {
             const chat = await msg.getChat();
-            const targetGroupsLower = TARGET_GROUPS.map((g) => g.toLowerCase().trim());
-            if (chat.isGroup && targetGroupsLower.includes(chat.name.toLowerCase().trim())) {
+            if (chat.isGroup) {
                 await saveMessage(chat.name, msg);
                 const author = await msg.getContact();
                 console.log(
@@ -246,36 +233,7 @@ async function saveMessage(groupName, msg) {
     fs.appendFileSync(EXPORT_FILE, JSON.stringify(messageData) + '\n');
 }
 
-function askForGroups() {
-    const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout
-    });
-
-    return new Promise((resolve) => {
-        rl.question(
-            'Enter the names of the groups you want to export (comma-separated):\n> ',
-            (answer) => {
-                TARGET_GROUPS = answer
-                    .split(',')
-                    .map((name) => name.trim())
-                    .filter((name) => name.length > 0);
-                rl.close();
-                resolve();
-            }
-        );
-    });
-}
-
 async function start() {
-    await askForGroups();
-
-    if (TARGET_GROUPS.length === 0) {
-        console.error('No groups provided. Exiting...');
-        process.exit(1);
-    }
-
-    console.log(`\nTarget groups set to: ${TARGET_GROUPS.join(', ')}\n`);
     startClient();
 }
 
