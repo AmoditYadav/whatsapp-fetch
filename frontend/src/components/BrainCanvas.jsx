@@ -161,25 +161,15 @@ export default function BrainCanvas({ agentState }) {
             const tilt = -0.25; // tilt down to see fissure
             const cX = Math.cos(tilt), sX = Math.sin(tilt);
             
-            // Helper to project and draw a point
-            const drawPoint = (p, isAmbient) => {
-                const t = time * p.speed + p.offset;
-                
-                let px = p.x, py = p.y, pz = p.z;
+            const drawList = [];
 
-                if (!isAmbient) {
-                    px += p.t1x * Math.sin(t * 1.3) * amp + p.t2x * Math.cos(t * 0.9 + 1.57) * amp;
-                    py += p.t1y * Math.sin(t * 1.3) * amp + p.t2y * Math.cos(t * 0.9 + 1.57) * amp;
-                    pz += p.t1z * Math.sin(t * 1.3) * amp + p.t2z * Math.cos(t * 0.9 + 1.57) * amp;
-                    
-                    px *= globalScale;
-                    py *= globalScale;
-                    pz *= globalScale;
-                } else {
-                    px += Math.sin(t) * 0.4;
-                    py += Math.cos(t * 0.7) * 0.3;
-                    pz += Math.sin(t * 0.5 + 1.2) * 0.3;
-                }
+            // Project all ambient points
+            for (let i = 0; i < ambientPoints.length; i++) {
+                const p = ambientPoints[i];
+                const t = time * p.speed + p.offset;
+                const px = p.x + Math.sin(t) * 0.4;
+                const py = p.y + Math.cos(t * 0.7) * 0.3;
+                const pz = p.z + Math.sin(t * 0.5 + 1.2) * 0.3;
 
                 const rx = cY * px + sY * pz;
                 const rz = -sY * px + cY * pz;
@@ -192,37 +182,105 @@ export default function BrainCanvas({ agentState }) {
                 const zOffset = 3.6;
                 const zTotal = fz + zOffset;
                 
-                if (zTotal <= 0.1) return;
+                if (zTotal > 0.1) {
+                    drawList.push({
+                        p: p,
+                        isAmbient: true,
+                        zTotal: zTotal,
+                        fx: fx, fy: fy,
+                        nx: 0, ny: 0, nz: 0
+                    });
+                }
+            }
+            
+            // Project all brain points
+            for (let i = 0; i < brainPoints.length; i++) {
+                const p = brainPoints[i];
+                const t = time * p.speed + p.offset;
+                
+                const px = (p.x + p.t1x * Math.sin(t * 1.3) * amp + p.t2x * Math.cos(t * 0.9 + 1.57) * amp) * globalScale;
+                const py = (p.y + p.t1y * Math.sin(t * 1.3) * amp + p.t2y * Math.cos(t * 0.9 + 1.57) * amp) * globalScale;
+                const pz = (p.z + p.t1z * Math.sin(t * 1.3) * amp + p.t2z * Math.cos(t * 0.9 + 1.57) * amp) * globalScale;
+                
+                const rx = cY * px + sY * pz;
+                const rz = -sY * px + cY * pz;
+                const ry = py;
 
-                const proj = (1.0 / zTotal) * scale;
-                const screenX = cx + fx * proj;
-                const screenY = cy - fy * proj;
+                const fx = rx;
+                const fy = cX * ry - sX * rz;
+                const fz = sX * ry + cX * rz;
 
-                const size = p.baseSize * proj * 0.4;
+                const zOffset = 3.6;
+                const zTotal = fz + zOffset;
+                
+                if (zTotal > 0.1) {
+                    // Rotate the normal for shading
+                    // Since it's a normal, we don't translate it
+                    const nrx = cY * p.nx + sY * p.nz;
+                    const nrz = -sY * p.nx + cY * p.nz;
+                    const nry = p.ny;
+                    
+                    const fnx = nrx;
+                    const fny = cX * nry - sX * nrz;
+                    const fnz = sX * nry + cX * nrz;
 
-                let alpha = isAmbient ? 0.25 : p.alphaMult * Math.min(1.0, 3.0 / zTotal);
-                if (alpha < 0.02) return;
+                    drawList.push({
+                        p: p,
+                        isAmbient: false,
+                        zTotal: zTotal,
+                        fx: fx, fy: fy,
+                        nx: fnx, ny: fny, nz: fnz
+                    });
+                }
+            }
+
+            // Painter's Algorithm: Sort by depth (furthest first)
+            drawList.sort((a, b) => b.zTotal - a.zTotal);
+
+            // Virtual light direction (top-right-front)
+            const lightDir = { x: 0.577, y: 0.577, z: 0.577 };
+
+            // Draw everything back-to-front
+            for (let i = 0; i < drawList.length; i++) {
+                const item = drawList[i];
+                const p = item.p;
+                const proj = (1.0 / item.zTotal) * scale;
+                const screenX = cx + item.fx * proj;
+                const screenY = cy - item.fy * proj;
+                
+                const size = p.baseSize * proj * 0.45;
+                
+                let alpha = item.isAmbient ? 0.25 : p.alphaMult * Math.min(1.0, 3.0 / item.zTotal);
+                if (alpha < 0.02) continue;
 
                 const baseCol = parsedColors[p.colorIdx];
                 let finalR = baseCol.r, finalG = baseCol.g, finalB = baseCol.b;
                 
-                if (!isAmbient && colorMix > 0) {
+                if (!item.isAmbient && colorMix > 0) {
                     finalR = finalR + (irisRgb.r - finalR) * colorMix;
                     finalG = finalG + (irisRgb.g - finalG) * colorMix;
                     finalB = finalB + (irisRgb.b - finalB) * colorMix;
+                }
+
+                // Shading (Lambertian diffuse)
+                if (!item.isAmbient) {
+                    const dot = item.nx * lightDir.x + item.ny * lightDir.y + item.nz * lightDir.z;
+                    // Map dot product from [-1, 1] to [0.3, 1.1] for ambient + diffuse light
+                    const intensity = Math.max(0.2, Math.min(1.1, dot * 0.6 + 0.5));
+                    finalR *= intensity;
+                    finalG *= intensity;
+                    finalB *= intensity;
+                    
+                    // Backface culling/fading (make points facing away from camera more transparent to avoid visual clutter)
+                    if (item.nz < 0) {
+                        alpha *= 0.1; // heavily dim the back side of the brain so front details pop
+                    }
                 }
 
                 ctx.fillStyle = `rgba(${finalR|0}, ${finalG|0}, ${finalB|0}, ${alpha})`;
                 ctx.beginPath();
                 ctx.arc(screenX, screenY, size, 0, Math.PI * 2);
                 ctx.fill();
-            };
-
-            for (let i = 0; i < ambientPoints.length; i++) {
-                drawPoint(ambientPoints[i], true);
-            }
-            for (let i = 0; i < brainPoints.length; i++) {
-                drawPoint(brainPoints[i], false);
             }
 
             animationFrameId = requestAnimationFrame(render);
