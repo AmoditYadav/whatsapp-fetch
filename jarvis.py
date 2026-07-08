@@ -163,8 +163,9 @@ def transcribe_audio(filename):
         print("   → Download ggml-large-v3-turbo.bin into the 'models/' folder. See jarvis_setup_guide.md.")
         return None
 
+    # Added "-t", "6" to utilize 6 CPU threads concurrently for faster CPU transcription
     result = subprocess.run(
-        [WHISPER_PATH, "-m", WHISPER_MODEL, "-f", filename, "-nt", "-otxt"],
+        [WHISPER_PATH, "-m", WHISPER_MODEL, "-f", filename, "-nt", "-otxt", "-t", "6"],
         capture_output=True, text=True, encoding="utf-8", errors="replace"
     )
 
@@ -233,7 +234,7 @@ def generate_response(prompt, messages, group_name):
         "Your task is to summarize the recent WhatsApp group messages provided. "
         "Follow these rules strictly:\n"
         "1. Adopt a polite, witty, British accent/tone (e.g., 'Very well, sir', 'It appears that...').\n"
-        "2. Be concise. Only summarize the key developments and highlights.\n"
+        "2. Be extremely concise. Keep the summary limited to 2 or 3 short sentences.\n"
         "3. Write responses exactly as they should be spoken. Do NOT use markdown (*, #, __), bullet points, or list numbers.\n"
         "4. Spell out acronyms or abbreviations if needed, so the Text-To-Speech engine pronounces them correctly.\n"
         "5. If there is no new activity or the context is empty, politely let the user know."
@@ -248,20 +249,20 @@ def generate_response(prompt, messages, group_name):
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
                 temperature=0.7,
-                max_output_tokens=300
+                max_output_tokens=150  # Lowered output tokens to speed up generation time
             )
         )
         return response.text
     except Exception as e:
-        print(f"⚠️  gemini-2.5-flash-lite returned error: {e}. Trying fallback gemini-1.5-flash...")
+        print(f"⚠️  gemini-2.5-flash-lite returned error: {e}. Trying fallback gemini-2.5-flash...")
         try:
             response = client.models.generate_content(
-                model='gemini-1.5-flash',
+                model='gemini-2.5-flash',
                 contents=user_prompt,
                 config=types.GenerateContentConfig(
                     system_instruction=system_prompt,
                     temperature=0.7,
-                    max_output_tokens=300
+                    max_output_tokens=150
                 )
             )
             return response.text
@@ -279,9 +280,9 @@ def speak(text):
         
     output_wav = "output.wav"
     
-    # Run Piper TTS via subprocess pipe
+    # Run Piper TTS via subprocess pipe. Added --length_scale 0.9 to make Jarvis speak 10% faster.
     process = subprocess.Popen(
-        [PIPER_PATH, "--model", PIPER_MODEL, "--output_file", output_wav],
+        [PIPER_PATH, "--model", PIPER_MODEL, "--output_file", output_wav, "--length_scale", "0.9"],
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL
