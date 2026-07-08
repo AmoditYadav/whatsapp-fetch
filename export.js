@@ -230,11 +230,18 @@ async function saveMessage(groupName, msg) {
         }
     }
 
+    let authorName = "Unknown";
+    try {
+        const contact = await msg.getContact();
+        authorName = contact.pushname || contact.name || contact.shortName || contact.number || msg.author || msg.from;
+    } catch (e) {}
+
     const messageData = {
         group: groupName,
         id: msgId,
         timestamp: msg.timestamp,
         author: msg.author || msg.from,
+        authorName: authorName,
         body: msg.body,
         type: msg.type,
         hasMedia: msg.hasMedia,

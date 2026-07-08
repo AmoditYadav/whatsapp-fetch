@@ -108,6 +108,26 @@ app.post('/api/jarvis/state', express.json(), (req, res) => {
     res.sendStatus(200);
 });
 
+// Queue for commands from the UI
+let commandQueue = [];
+
+app.post('/api/jarvis/command', express.json(), (req, res) => {
+    const { command } = req.body;
+    if (command) {
+        commandQueue.push(command);
+    }
+    res.sendStatus(200);
+});
+
+app.get('/api/jarvis/command', (req, res) => {
+    if (commandQueue.length > 0) {
+        const cmd = commandQueue.shift();
+        res.json({ command: cmd });
+    } else {
+        res.json({ command: null });
+    }
+});
+
 app.listen(PORT, () => {
     console.log(`\n==============================================`);
     console.log(` Dashboard is live at: http://localhost:${PORT}`);

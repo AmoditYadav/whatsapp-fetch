@@ -21,6 +21,83 @@ export default function AgentUI() {
     const audioCanvasRef = useRef(null);
     const cpuHistory = useRef(new Array(50).fill(14));
 
+    const [isMicActive, setIsMicActive] = useState(false);
+    const recognitionRef = useRef(null);
+
+    // Initialize Web Speech API
+    useEffect(() => {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SpeechRecognition) {
+            console.error("Speech Recognition API not supported in this browser.");
+            return;
+        }
+
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
+
+        recognition.onstart = () => setIsMicActive(true);
+        recognition.onend = () => {
+            setIsMicActive(false);
+            // Auto-restart if we want continuous listening, but we rely on the button toggle
+            if (recognitionRef.current && recognitionRef.current.autoRestart) {
+                try { recognition.start(); } catch(e) {}
+            }
+        };
+
+        recognition.onresult = (event) => {
+            let finalTranscript = '';
+            let interimTranscript = '';
+            for (let i = event.resultIndex; i < event.results.length; ++i) {
+                if (event.results[i].isFinal) {
+                    finalTranscript += event.results[i][0].transcript;
+                } else {
+                    interimTranscript += event.results[i][0].transcript;
+                }
+            }
+
+            const currentSpeech = (finalTranscript || interimTranscript).trim().toLowerCase();
+            if (currentSpeech) {
+                setSpokenText(`[USER]: ${currentSpeech.toUpperCase()}`);
+            }
+
+            // Wakeword detection
+            if (finalTranscript.toLowerCase().includes('jarvis')) {
+                const command = finalTranscript.trim();
+                console.log("Wakeword detected! Sending command:", command);
+                // Send to backend
+                fetch('/api/jarvis/command', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ command: command })
+                }).catch(err => console.error("Error sending command:", err));
+                
+                // Clear the current speech so we don't double trigger
+                recognition.stop(); 
+                // It will auto-restart if autoRestart is true
+            }
+        };
+
+        recognitionRef.current = recognition;
+        recognitionRef.current.autoRestart = false; // default off, toggled by button
+
+        return () => {
+            recognition.stop();
+        };
+    }, []);
+
+    const toggleMic = () => {
+        if (!recognitionRef.current) return alert("Speech Recognition not supported.");
+        if (isMicActive) {
+            recognitionRef.current.autoRestart = false;
+            recognitionRef.current.stop();
+        } else {
+            recognitionRef.current.autoRestart = true;
+            recognitionRef.current.start();
+        }
+    };
+
     useEffect(() => {
         const sseUrl = `${window.location.origin}/api/jarvis/stream`;
         let eventSource;
@@ -33,7 +110,8 @@ export default function AgentUI() {
                         setAgentState(data.value || data.state);
                     }
                     if (data.type === 'caption' || data.caption !== undefined) {
-                        setSpokenText(data.text || data.caption);
+                        // Only override text if Jarvis is actually speaking or resetting
+                        if (data.caption) setSpokenText(`> ${data.caption}`);
                     }
                 } catch (e) {}
             };
@@ -186,14 +264,24 @@ export default function AgentUI() {
                 <div className="absolute -bottom-20 left-1/2 w-[1px] h-[140px] bg-[#00f3ff]/40" />
             </div>
 
-            <div className="absolute top-8 right-8 w-[360px] flex flex-col gap-6">
+            <div className="absolute top-8 right-8 w-[360px] flex flex-col gap-6 z-50">
+                <button 
+                    onClick={toggleMic}
+                    className="relative border-2 border-[#00f3ff] p-3 text-center cursor-pointer hover:bg-[#00f3ff]/10 transition-colors"
+                    style={{ borderColor: isMicActive ? '#ff2a2a' : '#00f3ff', boxShadow: isMicActive ? '0 0 15px #ff2a2a' : 'none' }}
+                >
+                    <div className="font-bold tracking-widest" style={{ color: isMicActive ? '#ff2a2a' : '#00f3ff' }}>
+                        {isMicActive ? 'MIC: ACTIVE [WAKEWORD: JARVIS]' : 'MIC: OFFLINE (CLICK TO START)'}
+                    </div>
+                </button>
+
                 <div className="relative border-r-2 border-t-2 border-[#00f3ff] p-6 min-h-[160px] bg-[#00f3ff]/5" style={{ clipPath: 'polygon(0 0, 100% 0, 100% 100%, 15px 100%, 0 calc(100% - 15px))' }}>
                     <div className="text-[#0088ff] mb-2 font-bold tracking-widest flex items-center justify-between">
                         <span>LIVE.TRANSCRIPT // RX</span>
-                        {agentState === 'speaking' && <span className="w-2 h-2 rounded-full bg-[#ff2a2a] animate-pulse shadow-[0_0_8px_#ff2a2a]" />}
+                        {(agentState === 'speaking' || isMicActive) && <span className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: agentState === 'speaking' ? '#00f3ff' : '#ff2a2a', boxShadow: `0 0 8px ${agentState === 'speaking' ? '#00f3ff' : '#ff2a2a'}` }} />}
                     </div>
                     <div className="text-white text-sm leading-relaxed" style={{ textShadow: '0 0 5px rgba(255,255,255,0.5)' }}>
-                        {spokenText ? `> ${spokenText}` : '> AWAITING INPUT...'}
+                        {spokenText || '> AWAITING INPUT...'}
                     </div>
                 </div>
 
