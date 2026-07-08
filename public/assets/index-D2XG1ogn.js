@@ -4128,6 +4128,7 @@ No matching component was found for:
 attribute vec3 aColor;
 attribute float aSpeed;
 attribute float aOffset;
+attribute vec3 aNormal;
 
 varying vec3 vColor;
 varying float vAlpha;
@@ -4138,90 +4139,76 @@ uniform float uState;
 void main() {
     vColor = aColor;
 
+    // Base surface-bound drift — points slide tangentially along the surface
     vec3 pos = position;
-    float t = uTime * aSpeed + aOffset;
+    float t   = uTime * aSpeed + aOffset;
 
-    float amp = 0.08;
+    float amp = 0.014;
     if (uState == 1.0) {
-        // Listening: tighten towards center
-        pos *= 0.82;
-        amp = 0.03;
+        // Listening: pull tighter, shift to iris colour (done in fragment)
+        pos *= 0.88;
+        amp = 0.005;
     } else if (uState == 2.0) {
-        // Speaking: outward pulse
-        amp = 0.18;
-        float pulse = sin(uTime * 8.0) * 0.12;
-        pos += normalize(pos) * pulse;
+        // Speaking: pulse outwards rhythmically
+        amp = 0.028;
+        float pulse = sin(uTime * 7.0) * 0.055;
+        pos += aNormal * pulse;
     }
 
-    // Simple, cheap drift using sin/cos
-    pos.x += sin(t * 1.1) * amp;
-    pos.y += cos(t * 0.9) * amp;
-    pos.z += sin(t * 0.7 + 1.3) * amp;
+    // Tangential micro-drift (slide along surface, not inward/outward)
+    vec3 tang1 = normalize(cross(aNormal, vec3(0.0, 1.0, 0.001)));
+    vec3 tang2 = normalize(cross(aNormal, tang1));
+    pos += tang1 * sin(t * 1.3)         * amp;
+    pos += tang2 * cos(t * 0.9 + 1.57)  * amp;
 
-    // Slow Y-axis rotation
-    float angle = uTime * 0.05;
-    float c = cos(angle);
-    float s = sin(angle);
-    float nx = c * pos.x - s * pos.z;
-    float nz = s * pos.x + c * pos.z;
-    pos.x = nx;
-    pos.z = nz;
+    // Slow global Y-axis rotation
+    float angle = uTime * 0.06;
+    float c = cos(angle), s = sin(angle);
+    float nx2 =  c * pos.x + s * pos.z;
+    float nz2 = -s * pos.x + c * pos.z;
+    pos.x = nx2; pos.z = nz2;
 
-    // Fade out particles near the edge of the brain for organic look
-    float dist = length(position);
-    vAlpha = 1.0 - smoothstep(0.6, 1.2, dist);
+    // Alpha: fade points near the bottom (brain stem area)
+    vAlpha = smoothstep(-0.95, -0.3, position.y);
 
-    vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
-    gl_PointSize = (2.5 / -mvPosition.z) * 300.0;
-    gl_Position = projectionMatrix * mvPosition;
+    vec4 mvPos = modelViewMatrix * vec4(pos, 1.0);
+    gl_PointSize = clamp(280.0 / -mvPos.z, 1.5, 4.0);
+    gl_Position  = projectionMatrix * mvPos;
 }
 `,Qv=`
 varying vec3 vColor;
 varying float vAlpha;
-
 uniform float uState;
 
 void main() {
-    // Soft circular point shape
+    // Circular soft dot
     vec2 uv = gl_PointCoord - 0.5;
     float r = length(uv);
     if (r > 0.5) discard;
-    float alpha = vAlpha * (1.0 - smoothstep(0.3, 0.5, r));
 
-    vec3 color = vColor;
+    vec3 col = vColor;
     if (uState == 1.0) {
-        // Listening: fade to Electric Iris
-        color = mix(color, vec3(0.502, 0.322, 1.0), 0.85);
+        col = mix(col, vec3(0.502, 0.322, 1.0), 0.82); // Electric Iris
     }
 
-    gl_FragColor = vec4(color, alpha);
+    float alpha = vAlpha * (1.0 - smoothstep(0.3, 0.5, r));
+    if (alpha < 0.01) discard;
+    gl_FragColor = vec4(col, alpha);
 }
-`,$v=`
-attribute vec3 aColor;
-attribute float aSpeed;
-attribute float aOffset;
-varying vec3 vColor;
-
-uniform float uTime;
-
+`;function $v(e,t){let n=new Float32Array(e*3),r=new Float32Array(e*3),i=new Float32Array(e*3),a=new Float32Array(e),o=new Float32Array(e),s=.9,c=0;for(;c<e;){let e=Math.random()*Math.PI*2,l=Math.acos(2*Math.random()-1),u=Math.sin(l),d=Math.cos(l),f=1.05*u*Math.cos(e),p=s*d,m=.8*u*Math.sin(e),h=p/s;if(Math.abs(f)<.1&&h>-.25&&h<.95)continue;p<-.9*.6&&(p=-.9*.6-(p+s*.6)*.25);let g=Math.max(0,-h+.1)*Math.max(0,1-Math.abs(e-Math.PI)/Math.PI);f+=Math.sign(f)*g*.12;let _=Math.sqrt(f*f+p*p+m*m)||1,v=f/_,y=p/_,b=m/_,x=_+(.055*Math.sin(v*10+b*8)*Math.cos(y*9)+.03*Math.sin(y*14+v*6)*Math.cos(b*11)+.015*Math.cos(b*18+y*13)*Math.sin(v*7));f=v*x,p=y*x,m=b*x,n[c*3]=f,n[c*3+1]=p,n[c*3+2]=m,i[c*3]=v,i[c*3+1]=y,i[c*3+2]=b;let S=t[Math.floor(Math.random()*t.length)];r[c*3]=S.r,r[c*3+1]=S.g,r[c*3+2]=S.b,a[c]=.3+Math.random()*.5,o[c]=Math.random()*Math.PI*2,c++}let l=new J;return l.setAttribute(`position`,new Oi(n,3)),l.setAttribute(`aColor`,new Oi(r,3)),l.setAttribute(`aNormal`,new Oi(i,3)),l.setAttribute(`aSpeed`,new Oi(a,1)),l.setAttribute(`aOffset`,new Oi(o,1)),l}function ey(e,t){let n=new Float32Array(e*3),r=new Float32Array(e*3),i=new Float32Array(e),a=new Float32Array(e);for(let o=0;o<e;o++){n[o*3]=(Math.random()-.5)*14,n[o*3+1]=(Math.random()-.5)*8,n[o*3+2]=(Math.random()-.5)*10;let e=t[Math.floor(Math.random()*t.length)];r[o*3]=e.r,r[o*3+1]=e.g,r[o*3+2]=e.b,i[o]=.1+Math.random()*.2,a[o]=Math.random()*Math.PI*2}let o=new J;return o.setAttribute(`position`,new Oi(n,3)),o.setAttribute(`aColor`,new Oi(r,3)),o.setAttribute(`aSpeed`,new Oi(i,1)),o.setAttribute(`aOffset`,new Oi(a,1)),o}var ty=`
+attribute vec3 aColor; attribute float aSpeed; attribute float aOffset;
+varying vec3 vColor; uniform float uTime;
 void main() {
     vColor = aColor;
-
-    vec3 pos = position;
-    float t = uTime * aSpeed * 0.4 + aOffset;
-    pos.x += sin(t) * 0.5;
-    pos.y += cos(t * 0.8) * 0.4;
-    pos.z += sin(t * 0.6 + 2.0) * 0.4;
-
-    vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
-    gl_PointSize = (1.5 / -mvPosition.z) * 300.0;
-    gl_Position = projectionMatrix * mvPosition;
-}
-`,ey=`
+    vec3 p = position;
+    float t = uTime * aSpeed + aOffset;
+    p.x += sin(t) * 0.4; p.y += cos(t * 0.7) * 0.3; p.z += sin(t * 0.5 + 1.2) * 0.3;
+    vec4 mv = modelViewMatrix * vec4(p, 1.0);
+    gl_PointSize = clamp(160.0 / -mv.z, 1.0, 2.5);
+    gl_Position  = projectionMatrix * mv;
+}`,ny=`
 varying vec3 vColor;
 void main() {
-    vec2 uv = gl_PointCoord - 0.5;
-    if (length(uv) > 0.5) discard;
-    gl_FragColor = vec4(vColor, 0.25);
-}
-`;function ty({agentState:e}){let t=5e3,n={idle:0,listening:1,speaking:2},r=(0,v.useMemo)(()=>[new G(`#8052ff`),new G(`#ffb829`),new G(`#15846e`),new G(`#ffffff`)],[]),i=(0,v.useMemo)(()=>({uTime:{value:0},uState:{value:0}}),[]),a=(0,v.useMemo)(()=>({uTime:{value:0}}),[]),o=(0,v.useMemo)(()=>{let e=new Float32Array(t*3),n=new Float32Array(t*3),i=new Float32Array(t),a=new Float32Array(t);for(let o=0;o<t;o++){let t=Math.random()>.5?-.5:.5,s,c,l,u;do s=(Math.random()*2-1)*.72,c=(Math.random()*2-1)*.95,l=(Math.random()*2-1)*.72,u=(s/.72)**2+(c/.95)**2+(l/.72)**2;while(u>1);let d=Math.sin(s*8)*Math.sin(c*8)*.04;e[o*3]=t+s+d,e[o*3+1]=c+d,e[o*3+2]=l+d;let f=r[Math.floor(Math.random()*r.length)];n[o*3]=f.r,n[o*3+1]=f.g,n[o*3+2]=f.b,i[o]=.4+Math.random()*.6,a[o]=Math.random()*Math.PI*2}let o=new J;return o.setAttribute(`position`,new Oi(e,3)),o.setAttribute(`aColor`,new Oi(n,3)),o.setAttribute(`aSpeed`,new Oi(i,1)),o.setAttribute(`aOffset`,new Oi(a,1)),o},[r]),s=(0,v.useMemo)(()=>{let e=new Float32Array(400*3),t=new Float32Array(400*3),n=new Float32Array(400),i=new Float32Array(400);for(let a=0;a<400;a++){e[a*3]=(Math.random()-.5)*14,e[a*3+1]=(Math.random()-.5)*8,e[a*3+2]=(Math.random()-.5)*10;let o=r[Math.floor(Math.random()*r.length)];t[a*3]=o.r,t[a*3+1]=o.g,t[a*3+2]=o.b,n[a]=.2+Math.random()*.4,i[a]=Math.random()*Math.PI*2}let a=new J;return a.setAttribute(`position`,new Oi(e,3)),a.setAttribute(`aColor`,new Oi(t,3)),a.setAttribute(`aSpeed`,new Oi(n,1)),a.setAttribute(`aOffset`,new Oi(i,1)),a},[r]);return O_(t=>{let r=t.clock.getElapsedTime();i.uTime.value=r,i.uState.value=n[e]??0,a.uTime.value=r}),(0,Mg.jsxs)(`group`,{children:[(0,Mg.jsx)(`points`,{geometry:o,children:(0,Mg.jsx)(`shaderMaterial`,{vertexShader:Zv,fragmentShader:Qv,uniforms:i,transparent:!0,depthWrite:!1})}),(0,Mg.jsx)(`points`,{geometry:s,children:(0,Mg.jsx)(`shaderMaterial`,{vertexShader:$v,fragmentShader:ey,uniforms:a,transparent:!0,depthWrite:!1})})]})}function ny(){let[e,t]=(0,v.useState)(`idle`),[n,r]=(0,v.useState)(``);return(0,v.useEffect)(()=>{let e=`${window.location.origin}/api/jarvis/stream`,n;function i(){n=new EventSource(e),n.onmessage=e=>{try{let n=JSON.parse(e.data);n.state&&t(n.state),n.caption!==void 0&&r(n.caption)}catch(e){console.error(`Failed to parse SSE payload:`,e)}},n.onerror=()=>{console.warn(`SSE disconnected. Reconnecting in 3s...`),n.close(),setTimeout(i,3e3)}}return i(),()=>{n&&n.close()}},[]),(0,Mg.jsxs)(`div`,{className:`relative w-screen h-screen bg-void text-bone m-0 p-0 overflow-hidden select-none`,children:[(0,Mg.jsx)(`div`,{className:`absolute inset-0 w-full h-full z-0`,children:(0,Mg.jsxs)(Xv,{camera:{position:[0,0,3.2],fov:45},gl:{antialias:!1,alpha:!1,powerPreference:`low-power`},dpr:1,frameloop:`always`,performance:{min:.5},onCreated:({gl:e})=>{e.setClearColor(`#000000`,1)},children:[(0,Mg.jsx)(`ambientLight`,{intensity:1.5}),(0,Mg.jsx)(ty,{agentState:e})]})}),e===`speaking`&&n&&(0,Mg.jsx)(`div`,{className:`absolute bottom-120 left-1/2 -translate-x-1/2 w-full max-w-[800px] text-center z-10 font-sans pointer-events-none px-4 animate-fade-in`,style:{fontSize:`48px`,fontWeight:400,letterSpacing:`-1.68px`,lineHeight:1.2},children:(()=>{if(!n)return null;let e=n.split(` `);if(e.length<=6)return(0,Mg.jsx)(`span`,{className:`text-bone`,children:n});let t=e.length-6,r=e.slice(0,t).join(` `),i=e.slice(t).join(` `);return(0,Mg.jsxs)(Mg.Fragment,{children:[(0,Mg.jsxs)(`span`,{className:`text-silver`,children:[r,` `]}),(0,Mg.jsx)(`span`,{className:`text-bone`,children:i})]})})()}),e===`listening`&&(0,Mg.jsx)(`div`,{className:`absolute bottom-120 left-1/2 -translate-x-1/2 w-full max-w-[800px] text-center z-10 font-sans text-iris animate-pulse pointer-events-none`,style:{fontSize:`42px`,fontWeight:400,letterSpacing:`-1.68px`},children:`LISTENING...`})]})}function ry(){return(0,Mg.jsx)(ny,{})}(0,y.createRoot)(document.getElementById(`root`)).render((0,Mg.jsx)(v.StrictMode,{children:(0,Mg.jsx)(ry,{})}));
+    if (length(gl_PointCoord - 0.5) > 0.5) discard;
+    gl_FragColor = vec4(vColor, 0.18);
+}`;function ry({agentState:e}){let t={idle:0,listening:1,speaking:2},n=(0,v.useMemo)(()=>[new G(`#8052ff`),new G(`#ffb829`),new G(`#15846e`),new G(`#ffffff`)],[]),r=(0,v.useMemo)(()=>({uTime:{value:0},uState:{value:0}}),[]),i=(0,v.useMemo)(()=>({uTime:{value:0}}),[]),a=(0,v.useMemo)(()=>$v(6e3,n),[n]),o=(0,v.useMemo)(()=>ey(350,n),[n]);return O_(({clock:n})=>{let a=n.getElapsedTime();r.uTime.value=a,r.uState.value=t[e]??0,i.uTime.value=a}),(0,Mg.jsxs)(`group`,{children:[(0,Mg.jsx)(`points`,{geometry:a,children:(0,Mg.jsx)(`shaderMaterial`,{vertexShader:Zv,fragmentShader:Qv,uniforms:r,transparent:!0,depthWrite:!1})}),(0,Mg.jsx)(`points`,{geometry:o,children:(0,Mg.jsx)(`shaderMaterial`,{vertexShader:ty,fragmentShader:ny,uniforms:i,transparent:!0,depthWrite:!1})})]})}function iy(){let[e,t]=(0,v.useState)(`idle`),[n,r]=(0,v.useState)(``);return(0,v.useEffect)(()=>{let e=`${window.location.origin}/api/jarvis/stream`,n;function i(){n=new EventSource(e),n.onmessage=e=>{try{let n=JSON.parse(e.data);n.state&&t(n.state),n.caption!==void 0&&r(n.caption)}catch(e){console.error(`Failed to parse SSE payload:`,e)}},n.onerror=()=>{console.warn(`SSE disconnected. Reconnecting in 3s...`),n.close(),setTimeout(i,3e3)}}return i(),()=>{n&&n.close()}},[]),(0,Mg.jsxs)(`div`,{className:`relative w-screen h-screen bg-void text-bone m-0 p-0 overflow-hidden select-none`,children:[(0,Mg.jsx)(`div`,{className:`absolute inset-0 w-full h-full z-0`,children:(0,Mg.jsxs)(Xv,{camera:{position:[0,.8,3.6],fov:42,up:[0,1,0]},gl:{antialias:!1,alpha:!1,powerPreference:`low-power`},dpr:1,performance:{min:.5},onCreated:({gl:e})=>{e.setClearColor(`#000000`,1)},children:[(0,Mg.jsx)(`ambientLight`,{intensity:1.5}),(0,Mg.jsx)(`group`,{rotation:[-.22,0,0],children:(0,Mg.jsx)(ry,{agentState:e})})]})}),e===`speaking`&&n&&(0,Mg.jsx)(`div`,{className:`absolute bottom-120 left-1/2 -translate-x-1/2 w-full max-w-[800px] text-center z-10 font-sans pointer-events-none px-4 animate-fade-in`,style:{fontSize:`48px`,fontWeight:400,letterSpacing:`-1.68px`,lineHeight:1.2},children:(()=>{if(!n)return null;let e=n.split(` `);if(e.length<=6)return(0,Mg.jsx)(`span`,{className:`text-bone`,children:n});let t=e.length-6,r=e.slice(0,t).join(` `),i=e.slice(t).join(` `);return(0,Mg.jsxs)(Mg.Fragment,{children:[(0,Mg.jsxs)(`span`,{className:`text-silver`,children:[r,` `]}),(0,Mg.jsx)(`span`,{className:`text-bone`,children:i})]})})()}),e===`listening`&&(0,Mg.jsx)(`div`,{className:`absolute bottom-120 left-1/2 -translate-x-1/2 w-full max-w-[800px] text-center z-10 font-sans text-iris animate-pulse pointer-events-none`,style:{fontSize:`42px`,fontWeight:400,letterSpacing:`-1.68px`},children:`LISTENING...`})]})}function ay(){return(0,Mg.jsx)(iy,{})}(0,y.createRoot)(document.getElementById(`root`)).render((0,Mg.jsx)(v.StrictMode,{children:(0,Mg.jsx)(ay,{})}));

@@ -71,17 +71,19 @@ export default function AgentUI() {
             {/* R3F WebGL Canvas */}
             <div className="absolute inset-0 w-full h-full z-0">
                 <Canvas
-                    camera={{ position: [0, 0, 3.2], fov: 45 }}
+                    camera={{ position: [0, 0.8, 3.6], fov: 42, up: [0, 1, 0] }}
                     gl={{ antialias: false, alpha: false, powerPreference: 'low-power' }}
                     dpr={1}
-                    frameloop="always"
                     performance={{ min: 0.5 }}
                     onCreated={({ gl }) => {
                         gl.setClearColor('#000000', 1.0);
                     }}
                 >
                     <ambientLight intensity={1.5} />
-                    <BrainParticles agentState={agentState} />
+                    {/* Tilt the whole brain slightly forward so we see down into the fissure */}
+                    <group rotation={[-0.22, 0, 0]}>
+                        <BrainParticles agentState={agentState} />
+                    </group>
                 </Canvas>
             </div>
 
