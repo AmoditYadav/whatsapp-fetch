@@ -42,6 +42,41 @@ app.get('/api/messages', (req, res) => {
     });
 });
 
+// API endpoint to fetch the latest 20 messages for a specific group
+app.get('/api/groups/:name/latest', (req, res) => {
+    const groupName = req.params.name.toLowerCase().trim();
+    const messages = [];
+    if (!fs.existsSync(EXPORT_FILE)) {
+        return res.json({ messages: [] });
+    }
+    
+    const fileStream = fs.createReadStream(EXPORT_FILE);
+    const rl = readline.createInterface({
+        input: fileStream,
+        crlfDelay: Infinity
+    });
+
+    rl.on('line', (line) => {
+        if (line.trim()) {
+            try {
+                const msg = JSON.parse(line);
+                if (msg.group.toLowerCase().trim() === groupName) {
+                    messages.push(msg);
+                }
+            } catch (e) {
+                console.error("Error parsing a line:", e.message);
+            }
+        }
+    });
+
+    rl.on('close', () => {
+        // Sort oldest to newest, then slice last 20 messages
+        messages.sort((a, b) => a.timestamp - b.timestamp);
+        const latest = messages.slice(-20);
+        res.json({ messages: latest });
+    });
+});
+
 app.listen(PORT, () => {
     console.log(`\n==============================================`);
     console.log(` Dashboard is live at: http://localhost:${PORT}`);

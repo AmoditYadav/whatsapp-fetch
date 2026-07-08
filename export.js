@@ -35,15 +35,36 @@ process.on('unhandledRejection', (error) => {
     console.error('Unhandled Error:', error);
 });
 
+function killStaleBrowserLock() {
+    // On Windows, Chrome leaves a SingletonLock file if it was not closed cleanly.
+    // This prevents a new instance from starting. We delete it before launch.
+    const lockFile = path.join(__dirname, '.wwebjs_auth', 'session', 'SingletonLock');
+    const cookieLock = path.join(__dirname, '.wwebjs_auth', 'session', 'lockfile');
+    [lockFile, cookieLock].forEach((f) => {
+        try {
+            if (fs.existsSync(f)) {
+                fs.unlinkSync(f);
+                console.log(`[i] Removed stale browser lock: ${path.basename(f)}`);
+            }
+        } catch (_) {}
+    });
+}
+
 // ==========================================
 // BOT LOGIC
 // ==========================================
 function startClient() {
     isDisconnecting = false;
 
+    // Always clear stale lock files before launching a new browser instance
+    killStaleBrowserLock();
+
     const client = new Client({
         authStrategy: new LocalAuth(),
-        puppeteer: { headless: true }
+        puppeteer: {
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
+        }
     });
 
     client.on('qr', (qr) => {
