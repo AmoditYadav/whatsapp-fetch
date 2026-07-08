@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Canvas } from '@react-three/fiber';
-import BrainParticles from './BrainParticles';
+import BrainCanvas from './BrainCanvas';
 
 export default function AgentUI() {
     const [agentState, setAgentState] = useState('idle'); // 'idle' | 'listening' | 'speaking'
@@ -68,23 +67,9 @@ export default function AgentUI() {
 
     return (
         <div className="relative w-screen h-screen bg-void text-bone m-0 p-0 overflow-hidden select-none">
-            {/* R3F WebGL Canvas */}
-            <div className="absolute inset-0 w-full h-full z-0">
-                <Canvas
-                    camera={{ position: [0, 0.8, 3.6], fov: 42, up: [0, 1, 0] }}
-                    gl={{ antialias: false, alpha: false, powerPreference: 'low-power' }}
-                    dpr={1}
-                    performance={{ min: 0.5 }}
-                    onCreated={({ gl }) => {
-                        gl.setClearColor('#000000', 1.0);
-                    }}
-                >
-                    <ambientLight intensity={1.5} />
-                    {/* Tilt the whole brain slightly forward so we see down into the fissure */}
-                    <group rotation={[-0.22, 0, 0]}>
-                        <BrainParticles agentState={agentState} />
-                    </group>
-                </Canvas>
+            {/* Pure HTML5 2D Canvas Brain (No WebGL/Three.js) */}
+            <div className="absolute inset-0 w-full h-full z-0 pointer-events-none">
+                <BrainCanvas agentState={agentState} />
             </div>
 
             {/* Speach Caption Overlay */}
