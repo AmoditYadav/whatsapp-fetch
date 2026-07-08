@@ -23,6 +23,8 @@ export default function AgentUI() {
 
     const [isMicActive, setIsMicActive] = useState(false);
     const recognitionRef = useRef(null);
+    const awaitingCommandRef = useRef(false);
+    const micEnabledByUserRef = useRef(false);
 
     // Initialize Web Speech API
     useEffect(() => {
@@ -40,10 +42,21 @@ export default function AgentUI() {
         recognition.onstart = () => setIsMicActive(true);
         recognition.onend = () => {
             setIsMicActive(false);
-            // Auto-restart if we want continuous listening, but we rely on the button toggle
-            if (recognitionRef.current && recognitionRef.current.autoRestart) {
+            // Auto-restart if user wants it on AND agent is not currently speaking
+            if (micEnabledByUserRef.current && window.currentAgentState !== 'speaking') {
                 try { recognition.start(); } catch(e) {}
             }
+        };
+
+        const sendCommand = (cmd) => {
+            fetch('/api/jarvis/command', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ command: cmd })
+            }).catch(err => console.error("Error sending command:", err));
+            
+            // Stop listening to prevent hearing Jarvis's response
+            recognition.stop();
         };
 
         recognition.onresult = (event) => {
@@ -57,44 +70,69 @@ export default function AgentUI() {
                 }
             }
 
-            const currentSpeech = (finalTranscript || interimTranscript).trim().toLowerCase();
+            const currentSpeech = (finalTranscript || interimTranscript).trim();
             if (currentSpeech) {
                 setSpokenText(`[USER]: ${currentSpeech.toUpperCase()}`);
             }
 
-            // Wakeword detection
-            if (finalTranscript.toLowerCase().includes('jarvis')) {
-                const command = finalTranscript.trim();
-                console.log("Wakeword detected! Sending command:", command);
-                // Send to backend
-                fetch('/api/jarvis/command', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ command: command })
-                }).catch(err => console.error("Error sending command:", err));
+            if (finalTranscript) {
+                const lowerFinal = finalTranscript.toLowerCase();
                 
-                // Clear the current speech so we don't double trigger
-                recognition.stop(); 
-                // It will auto-restart if autoRestart is true
+                // If user previously said "Jarvis" and paused
+                if (awaitingCommandRef.current) {
+                    console.log("Sending awaited command:", finalTranscript);
+                    sendCommand(finalTranscript.trim());
+                    awaitingCommandRef.current = false;
+                    return;
+                }
+
+                // If "jarvis" is in this phrase
+                if (lowerFinal.includes('jarvis')) {
+                    const idx = lowerFinal.indexOf('jarvis');
+                    const commandPart = finalTranscript.substring(idx + 6).trim();
+                    const cleanCommand = commandPart.replace(/[.,!?]/g, '').trim();
+
+                    if (cleanCommand.length > 0) {
+                        // Spoken in one breath
+                        console.log("Wakeword detected! Sending command:", commandPart);
+                        sendCommand(commandPart);
+                    } else {
+                        // Said "Jarvis" and paused
+                        console.log("Wakeword detected. Waiting for command...");
+                        setSpokenText(`[SYS]: LISTENING FOR COMMAND...`);
+                        awaitingCommandRef.current = true;
+                    }
+                }
             }
         };
 
         recognitionRef.current = recognition;
-        recognitionRef.current.autoRestart = false; // default off, toggled by button
 
         return () => {
             recognition.stop();
         };
     }, []);
 
+    // Sync agent state changes with the microphone
+    useEffect(() => {
+        window.currentAgentState = agentState;
+        if (agentState === 'speaking' && isMicActive && recognitionRef.current) {
+            // Force pause the mic while Jarvis speaks
+            recognitionRef.current.stop();
+        } else if (agentState === 'idle' && micEnabledByUserRef.current && !isMicActive && recognitionRef.current) {
+            // Resume listening when Jarvis finishes
+            try { recognitionRef.current.start(); } catch(e) {}
+        }
+    }, [agentState, isMicActive]);
+
     const toggleMic = () => {
         if (!recognitionRef.current) return alert("Speech Recognition not supported.");
-        if (isMicActive) {
-            recognitionRef.current.autoRestart = false;
+        if (micEnabledByUserRef.current) {
+            micEnabledByUserRef.current = false;
             recognitionRef.current.stop();
         } else {
-            recognitionRef.current.autoRestart = true;
-            recognitionRef.current.start();
+            micEnabledByUserRef.current = true;
+            try { recognitionRef.current.start(); } catch(e) {}
         }
     };
 
