@@ -12,3 +12,5 @@ piper.exe
 *.json
 frontend/node_modules/
 frontend/dist/
+.env
+*.env

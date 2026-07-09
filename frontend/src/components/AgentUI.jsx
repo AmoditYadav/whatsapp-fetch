@@ -1,351 +1,634 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 
-const generateMockNetworkData = () => {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    let str = '';
-    for (let i = 0; i < 32; i++) {
-        str += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return `RECV: [${str}] OK`;
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+const generateNetworkHex = () => {
+    const chars = 'ABCDEF0123456789';
+    return Array.from({ length: 24 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
 };
 
+const pad2 = (n) => String(n).padStart(2, '0');
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+const STATE_COLORS = {
+    idle:       { primary: '#00e5ff', glow: 'rgba(0,229,255,0.4)',  ring: '#00e5ff33' },
+    processing: { primary: '#ffb300', glow: 'rgba(255,179,0,0.4)',  ring: '#ffb30033' },
+    speaking:   { primary: '#e040fb', glow: 'rgba(224,64,251,0.5)', ring: '#e040fb33' },
+};
+const STATE_LABELS = {
+    idle:       'STANDING BY',
+    processing: 'PROCESSING',
+    speaking:   'SPEAKING',
+};
+
+// ─── Main Component ──────────────────────────────────────────────────────────
+
 export default function AgentUI() {
-    const [agentState, setAgentState] = useState('idle');
-    const [spokenText, setSpokenText] = useState('');
-    const [cpuUsage, setCpuUsage] = useState(14);
-    const [ramUsage, setRamUsage] = useState(8.2);
-    const [networkLog, setNetworkLog] = useState([]);
-    const [time, setTime] = useState('');
+    const [agentState, setAgentState]   = useState('idle');
+    const [transcript, setTranscript]   = useState('');
+    const [caption, setCaption]         = useState('');
+    const [isMicOn, setIsMicOn]         = useState(false);
+    const [time, setTime]               = useState({ hm: '00:00', s: '00', ms: '00' });
+    const [cpuVal, setCpuVal]           = useState(14);
+    const [ramVal, setRamVal]           = useState(8.2);
+    const [netLog, setNetLog]           = useState([]);
 
-    const cpuCanvasRef = useRef(null);
-    const audioCanvasRef = useRef(null);
-    const cpuHistory = useRef(new Array(50).fill(14));
+    // Refs — recognition engine
+    const recogRef          = useRef(null);
+    const micOnRef          = useRef(false);       // true = user wants mic running
+    const agentStateRef     = useRef('idle');       // mirror of agentState for use inside closures
+    const isCommandModeRef  = useRef(false);        // wakeword heard, collecting command
+    const cmdBufferRef      = useRef('');           // confirmed final words since wakeword
+    const wakeResultIdxRef  = useRef(-1);           // resultIndex where wakeword was found
+    const debounceRef       = useRef(null);
+    const sessionIdRef      = useRef(0);            // increments every time recognition starts
 
-    const [isMicActive, setIsMicActive] = useState(false);
-    const recognitionRef = useRef(null);
-    const awaitingCommandRef = useRef(false);
-    const micEnabledByUserRef = useRef(false);
+    // Refs — canvas
+    const cpuCanvasRef  = useRef(null);
+    const waveCanvasRef = useRef(null);
+    const cpuHistory    = useRef(new Array(60).fill(14));
 
-    // Initialize Web Speech API
+    // ── keep agentStateRef in sync ────────────────────────────────────────────
     useEffect(() => {
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (!SpeechRecognition) {
-            console.error("Speech Recognition API not supported in this browser.");
+        agentStateRef.current = agentState;
+    }, [agentState]);
+
+    // ─── Reset all recognition state (call every time recognition restarts) ──
+    const resetRecogState = useCallback(() => {
+        isCommandModeRef.current = false;
+        wakeResultIdxRef.current = -1;
+        cmdBufferRef.current     = '';
+        if (debounceRef.current) {
+            clearTimeout(debounceRef.current);
+            debounceRef.current = null;
+        }
+    }, []);
+
+    // ─── Send a command to Jarvis backend ────────────────────────────────────
+    const sendCommand = useCallback((cmd) => {
+        if (debounceRef.current) { clearTimeout(debounceRef.current); debounceRef.current = null; }
+
+        const clean = cmd.trim().replace(/^[\s,.:!?]+/, '').trim();
+        if (!clean) {
+            resetRecogState();
             return;
         }
 
-        const recognition = new SpeechRecognition();
-        recognition.continuous = true;
-        recognition.interimResults = true;
-        recognition.lang = 'en-US';
+        console.log('[Jarvis] Sending command:', clean);
+        setTranscript(`[YOU] › ${clean.toUpperCase()}`);
 
-        recognition.onstart = () => setIsMicActive(true);
-        recognition.onend = () => {
-            setIsMicActive(false);
-            // Auto-restart if user wants it on AND agent is not currently speaking
-            if (micEnabledByUserRef.current && window.currentAgentState !== 'speaking') {
-                try { recognition.start(); } catch(e) {}
+        fetch('/api/jarvis/command', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: clean }),
+        }).catch(err => console.error('[Jarvis] send error:', err));
+
+        // Stop the mic — it will restart when backend sends 'idle'
+        resetRecogState();
+        if (recogRef.current) {
+            try { recogRef.current.stop(); } catch (_) {}
+        }
+    }, [resetRecogState]);
+
+    // ─── Speech Recognition setup (runs once) ────────────────────────────────
+    useEffect(() => {
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SR) { console.warn('[Jarvis] SpeechRecognition not available'); return; }
+
+        const rec = new SR();
+        rec.continuous      = true;
+        rec.interimResults  = true;
+        rec.lang            = 'en-US';
+        recogRef.current    = rec;
+
+        rec.onstart = () => {
+            sessionIdRef.current += 1;   // new session → all old resultIndex values are invalid
+            resetRecogState();            // clear stale wakeword / command state
+            setIsMicOn(true);
+        };
+
+        rec.onerror = (ev) => {
+            console.error('[Jarvis] rec error:', ev.error);
+            if (ev.error === 'not-allowed' || ev.error === 'audio-capture') {
+                micOnRef.current = false;
+                setIsMicOn(false);
             }
         };
 
-        const sendCommand = (cmd) => {
-            fetch('/api/jarvis/command', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ command: cmd })
-            }).catch(err => console.error("Error sending command:", err));
-            
-            // Stop listening to prevent hearing Jarvis's response
-            recognition.stop();
-        };
-
-        recognition.onresult = (event) => {
-            let finalTranscript = '';
-            let interimTranscript = '';
-            for (let i = event.resultIndex; i < event.results.length; ++i) {
-                if (event.results[i].isFinal) {
-                    finalTranscript += event.results[i][0].transcript;
-                } else {
-                    interimTranscript += event.results[i][0].transcript;
-                }
-            }
-
-            const currentSpeech = (finalTranscript || interimTranscript).trim();
-            if (currentSpeech) {
-                setSpokenText(`[USER]: ${currentSpeech.toUpperCase()}`);
-            }
-
-            if (finalTranscript) {
-                const lowerFinal = finalTranscript.toLowerCase();
-                
-                // If user previously said "Jarvis" and paused
-                if (awaitingCommandRef.current) {
-                    console.log("Sending awaited command:", finalTranscript);
-                    sendCommand(finalTranscript.trim());
-                    awaitingCommandRef.current = false;
-                    return;
-                }
-
-                // If "jarvis" is in this phrase
-                if (lowerFinal.includes('jarvis')) {
-                    const idx = lowerFinal.indexOf('jarvis');
-                    const commandPart = finalTranscript.substring(idx + 6).trim();
-                    const cleanCommand = commandPart.replace(/[.,!?]/g, '').trim();
-
-                    if (cleanCommand.length > 0) {
-                        // Spoken in one breath
-                        console.log("Wakeword detected! Sending command:", commandPart);
-                        sendCommand(commandPart);
-                    } else {
-                        // Said "Jarvis" and paused
-                        console.log("Wakeword detected. Waiting for command...");
-                        setSpokenText(`[SYS]: LISTENING FOR COMMAND...`);
-                        awaitingCommandRef.current = true;
+        rec.onend = () => {
+            setIsMicOn(false);
+            // Auto-restart only when: user wants mic AND agent is not busy
+            if (micOnRef.current && agentStateRef.current === 'idle') {
+                setTimeout(() => {
+                    if (micOnRef.current && agentStateRef.current === 'idle') {
+                        try { rec.start(); } catch (_) {}
                     }
-                }
+                }, 350);
             }
         };
 
-        recognitionRef.current = recognition;
+        rec.onresult = (event) => {
+            if (isCommandModeRef.current && wakeResultIdxRef.current !== -1) {
+                // ── Command-collection mode ──────────────────────────────────
+                let finalWords    = '';
+                let interimWords  = '';
+
+                for (let i = wakeResultIdxRef.current; i < event.results.length; i++) {
+                    let text = event.results[i][0].transcript;
+
+                    // Strip "jarvis" prefix from the anchor result only
+                    if (i === wakeResultIdxRef.current) {
+                        const lo = text.toLowerCase();
+                        const wi = lo.indexOf('jarvis');
+                        if (wi !== -1) text = text.substring(wi + 6);
+                    }
+
+                    if (event.results[i].isFinal) finalWords   += text + ' ';
+                    else                           interimWords += text + ' ';
+                }
+
+                cmdBufferRef.current = finalWords.trim();
+                const display = (cmdBufferRef.current + ' ' + interimWords).trim().replace(/^[\s,.:!?]+/, '');
+                if (display) setTranscript(`[YOU] › ${display.toUpperCase()}`);
+
+                // Restart 1.4s silence debounce on every new speech fragment
+                if (debounceRef.current) clearTimeout(debounceRef.current);
+                debounceRef.current = setTimeout(() => {
+                    const final = cmdBufferRef.current || interimWords.trim();
+                    if (final.trim()) {
+                        sendCommand(final.trim());
+                    } else {
+                        resetRecogState();
+                        setTranscript('');
+                    }
+                }, 1400);
+
+            } else {
+                // ── Passive / wakeword-detection mode ───────────────────────
+                let passiveText = '';
+                for (let i = event.resultIndex; i < event.results.length; i++) {
+                    const text = event.results[i][0].transcript;
+                    const lo   = text.toLowerCase();
+                    const wi   = lo.indexOf('jarvis');
+
+                    if (wi !== -1) {
+                        // Wakeword detected!
+                        isCommandModeRef.current  = true;
+                        wakeResultIdxRef.current  = i;
+                        cmdBufferRef.current      = text.substring(wi + 6).trim();
+                        const post = cmdBufferRef.current.replace(/^[\s,.:!?]+/, '').trim();
+                        setTranscript(post ? `[YOU] › ${post.toUpperCase()}` : '[ LISTENING FOR COMMAND… ]');
+
+                        if (debounceRef.current) clearTimeout(debounceRef.current);
+                        debounceRef.current = setTimeout(() => {
+                            const final = cmdBufferRef.current;
+                            if (final.trim()) sendCommand(final.trim());
+                            else { resetRecogState(); setTranscript(''); }
+                        }, 1400);
+                        break;
+                    }
+
+                    passiveText += text;
+                }
+
+                if (!isCommandModeRef.current && passiveText.trim()) {
+                    setTranscript(`[ENV] › ${passiveText.trim().toUpperCase()}`);
+                }
+            }
+        };
 
         return () => {
-            recognition.stop();
+            rec.stop();
+            resetRecogState();
         };
-    }, []);
+    }, [resetRecogState, sendCommand]);
 
-    // Sync agent state changes with the microphone
+    // ─── Agent state → mic control ────────────────────────────────────────────
     useEffect(() => {
-        window.currentAgentState = agentState;
-        if (agentState === 'speaking' && isMicActive && recognitionRef.current) {
-            // Force pause the mic while Jarvis speaks
-            recognitionRef.current.stop();
-        } else if (agentState === 'idle' && micEnabledByUserRef.current && !isMicActive && recognitionRef.current) {
-            // Resume listening when Jarvis finishes
-            try { recognitionRef.current.start(); } catch(e) {}
-        }
-    }, [agentState, isMicActive]);
+        agentStateRef.current = agentState;
 
+        if (agentState === 'speaking' || agentState === 'processing') {
+            // Halt mic while Jarvis is busy
+            if (recogRef.current) try { recogRef.current.stop(); } catch (_) {}
+        } else if (agentState === 'idle' && micOnRef.current) {
+            // Resume mic when Jarvis goes idle
+            resetRecogState();
+            setTimeout(() => {
+                if (micOnRef.current && agentStateRef.current === 'idle') {
+                    try { recogRef.current.start(); } catch (_) {}
+                }
+            }, 300);
+        }
+    }, [agentState, resetRecogState]);
+
+    // ─── Toggle mic button ────────────────────────────────────────────────────
     const toggleMic = () => {
-        if (!recognitionRef.current) return alert("Speech Recognition not supported.");
-        if (micEnabledByUserRef.current) {
-            micEnabledByUserRef.current = false;
-            recognitionRef.current.stop();
+        if (!recogRef.current) { alert('Speech Recognition not supported in this browser.'); return; }
+        if (micOnRef.current) {
+            micOnRef.current = false;
+            try { recogRef.current.stop(); } catch (_) {}
+            setIsMicOn(false);
         } else {
-            micEnabledByUserRef.current = true;
-            try { recognitionRef.current.start(); } catch(e) {}
+            micOnRef.current = true;
+            resetRecogState();
+            try { recogRef.current.start(); } catch (_) {}
         }
     };
 
+    // ─── SSE — receive state + caption from Jarvis backend ───────────────────
     useEffect(() => {
-        const sseUrl = `${window.location.origin}/api/jarvis/stream`;
-        let eventSource;
-        function connect() {
-            eventSource = new EventSource(sseUrl);
-            eventSource.onmessage = (event) => {
+        let es;
+        const connect = () => {
+            es = new EventSource(`${window.location.origin}/api/jarvis/stream`);
+            es.onmessage = (ev) => {
                 try {
-                    const data = JSON.parse(event.data);
-                    if (data.type === 'state' || data.state) {
-                        setAgentState(data.value || data.state);
-                    }
-                    if (data.type === 'caption' || data.caption !== undefined) {
-                        // Only override text if Jarvis is actually speaking or resetting
-                        if (data.caption) setSpokenText(`> ${data.caption}`);
-                    }
-                } catch (e) {}
+                    const d = JSON.parse(ev.data);
+                    if (d.state) setAgentState(d.state);
+                    // caption can be empty string (to clear) — use !== undefined
+                    if (d.caption !== undefined) setCaption(d.caption);
+                } catch (_) {}
             };
-            eventSource.onerror = () => {
-                eventSource.close();
-                setTimeout(connect, 3000);
-            };
-        }
+            es.onerror = () => { es.close(); setTimeout(connect, 3000); };
+        };
         connect();
-        return () => eventSource && eventSource.close();
+        return () => es && es.close();
     }, []);
 
+    // ─── Clock + fake metrics ─────────────────────────────────────────────────
     useEffect(() => {
-        const interval = setInterval(() => {
+        const id = setInterval(() => {
             const now = new Date();
-            setTime(now.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 2 }).replace('.', ':'));
-            
-            const newCpu = Math.max(2, Math.min(98, cpuUsage + (Math.random() * 20 - 10)));
-            setCpuUsage(newCpu);
-            cpuHistory.current.push(newCpu);
-            if (cpuHistory.current.length > 50) cpuHistory.current.shift();
-
-            setRamUsage(prev => Math.max(6.0, Math.min(15.0, prev + (Math.random() * 0.4 - 0.2))));
-
-            setNetworkLog(prev => {
-                const newLog = [...prev, generateMockNetworkData()];
-                if (newLog.length > 15) newLog.shift();
-                return newLog;
+            setTime({
+                hm: `${pad2(now.getHours())}:${pad2(now.getMinutes())}`,
+                s:  pad2(now.getSeconds()),
+                ms: pad2(Math.floor(now.getMilliseconds() / 10)),
             });
-        }, 100);
-        return () => clearInterval(interval);
-    }, [cpuUsage]);
+            setCpuVal(prev => {
+                const v = Math.max(2, Math.min(98, prev + (Math.random() * 16 - 8)));
+                cpuHistory.current.push(v);
+                if (cpuHistory.current.length > 60) cpuHistory.current.shift();
+                return v;
+            });
+            setRamVal(prev => Math.max(5.5, Math.min(14.5, prev + (Math.random() * 0.3 - 0.15))));
+            setNetLog(prev => {
+                const next = [...prev, `0x${generateNetworkHex()} ✓`];
+                return next.length > 12 ? next.slice(-12) : next;
+            });
+        }, 120);
+        return () => clearInterval(id);
+    }, []);
 
+    // ─── CPU canvas ───────────────────────────────────────────────────────────
     useEffect(() => {
-        const canvas = cpuCanvasRef.current;
-        if (!canvas) return;
-        const ctx = canvas.getContext('2d');
-        const w = canvas.width;
-        const h = canvas.height;
+        const c = cpuCanvasRef.current; if (!c) return;
+        const ctx = c.getContext('2d');
+        const w = c.width, h = c.height;
         ctx.clearRect(0, 0, w, h);
-        ctx.strokeStyle = '#00f3ff';
-        ctx.lineWidth = 2;
+        const step = w / (cpuHistory.current.length - 1);
+        const grad = ctx.createLinearGradient(0, 0, 0, h);
+        grad.addColorStop(0,   'rgba(0,229,255,0.9)');
+        grad.addColorStop(1,   'rgba(0,229,255,0.05)');
+        ctx.strokeStyle = '#00e5ff';
+        ctx.lineWidth   = 2;
+        ctx.shadowBlur  = 8;
+        ctx.shadowColor = '#00e5ff';
         ctx.beginPath();
-        const step = w / 50;
-        for (let i = 0; i < cpuHistory.current.length; i++) {
-            const x = i * step;
-            const y = h - (cpuHistory.current[i] / 100) * h;
-            if (i === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-        }
+        cpuHistory.current.forEach((v, i) => {
+            const x = i * step, y = h - (v / 100) * h;
+            i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        });
         ctx.stroke();
-        
-        ctx.fillStyle = 'rgba(0, 243, 255, 0.1)';
-        ctx.lineTo(w, h);
-        ctx.lineTo(0, h);
+        ctx.shadowBlur = 0;
+        // fill below
+        ctx.lineTo(w, h); ctx.lineTo(0, h);
+        ctx.fillStyle = grad;
         ctx.fill();
-    }, [cpuUsage]);
+    }, [cpuVal]);
 
+    // ─── Waveform canvas ──────────────────────────────────────────────────────
     useEffect(() => {
-        const canvas = audioCanvasRef.current;
-        if (!canvas) return;
-        const ctx = canvas.getContext('2d');
-        let animationId;
-        const renderAudio = () => {
-            const w = canvas.width;
-            const h = canvas.height;
+        const c = waveCanvasRef.current; if (!c) return;
+        const ctx = c.getContext('2d');
+        let raf;
+        const col = STATE_COLORS[agentState] || STATE_COLORS.idle;
+        const draw = () => {
+            const w = c.width, h = c.height;
             ctx.clearRect(0, 0, w, h);
-            const bars = 64;
-            const barWidth = (w / bars) - 2;
-            ctx.fillStyle = agentState === 'speaking' ? '#00f3ff' : '#0088ff';
+            const bars = 80;
+            const bw   = w / bars - 1;
             for (let i = 0; i < bars; i++) {
-                const heightMult = agentState === 'speaking' ? (Math.random() * 0.8 + 0.2) : (Math.random() * 0.1 + 0.05);
-                const barHeight = heightMult * h;
-                const x = i * (barWidth + 2);
-                const y = h - barHeight;
-                ctx.fillRect(x, y, barWidth, barHeight);
-                ctx.shadowBlur = 10;
-                ctx.shadowColor = ctx.fillStyle;
+                let amp;
+                if (agentState === 'speaking') {
+                    amp = (Math.random() * 0.7 + 0.3) * h;
+                } else if (agentState === 'processing') {
+                    const phase = (Date.now() / 200 + i * 0.3) % (Math.PI * 2);
+                    amp = (Math.sin(phase) * 0.3 + 0.35) * h;
+                } else {
+                    amp = (Math.random() * 0.08 + 0.04) * h;
+                }
+                const x = i * (bw + 1);
+                const y = (h - amp) / 2;
+                ctx.fillStyle   = col.primary;
+                ctx.shadowBlur  = agentState !== 'idle' ? 12 : 4;
+                ctx.shadowColor = col.primary;
+                ctx.fillRect(x, y, bw, amp);
             }
-            animationId = requestAnimationFrame(renderAudio);
+            raf = requestAnimationFrame(draw);
         };
-        renderAudio();
-        return () => cancelAnimationFrame(animationId);
+        draw();
+        return () => cancelAnimationFrame(raf);
     }, [agentState]);
 
+    // ─── Derived display values ────────────────────────────────────────────────
+    const col       = STATE_COLORS[agentState] || STATE_COLORS.idle;
+    const stateLabel = STATE_LABELS[agentState] || agentState.toUpperCase();
+    const displayText = caption || transcript || '> AWAITING COMMAND — SAY "JARVIS …"';
+
+    const ringStyle = (size, dur, rev, col, dash) => ({
+        position: 'absolute',
+        width: size, height: size,
+        borderRadius: '50%',
+        border: `2px ${dash ? 'dashed' : 'solid'} ${col}`,
+        animation: `${rev ? 'spin-ccw' : 'spin-cw'} ${dur}s linear infinite`,
+        boxShadow: `0 0 8px ${col}`,
+    });
+
     return (
-        <div 
-            className="fixed inset-0 w-screen h-screen overflow-hidden text-[#00f3ff] font-mono select-none"
+        <div
+            id="jarvis-root"
             style={{
-                backgroundColor: '#050914',
-                backgroundImage: 'linear-gradient(rgba(0, 243, 255, 0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(0, 243, 255, 0.03) 1px, transparent 1px)',
-                backgroundSize: '40px 40px',
-                textTransform: 'uppercase',
-                fontSize: '12px',
-                letterSpacing: '1px'
+                position: 'fixed', inset: 0,
+                background: 'radial-gradient(ellipse at 50% 30%, #06101f 0%, #020810 70%)',
+                fontFamily: "'Share Tech Mono', 'Courier New', monospace",
+                color: col.primary,
+                overflow: 'hidden',
+                userSelect: 'none',
+                fontSize: 12,
+                letterSpacing: '0.08em',
             }}
         >
+            {/* Google Fonts */}
+            <link rel="preconnect" href="https://fonts.googleapis.com" />
+            <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet" />
+
             <style>{`
-                @keyframes spin-cw { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+                @keyframes spin-cw  { from { transform: rotate(0deg); }   to { transform: rotate(360deg); } }
                 @keyframes spin-ccw { from { transform: rotate(360deg); } to { transform: rotate(0deg); } }
-                @keyframes pulse-core { 0% { box-shadow: 0 0 20px #00f3ff; } 50% { box-shadow: 0 0 60px #00f3ff, inset 0 0 20px #00f3ff; } 100% { box-shadow: 0 0 20px #00f3ff; } }
-                @keyframes pulse-speak { 0% { box-shadow: 0 0 40px #ff2a2a; border-color: #ff2a2a; } 50% { box-shadow: 0 0 100px #ff2a2a, inset 0 0 40px #ff2a2a; border-color: #ff2a2a; } 100% { box-shadow: 0 0 40px #ff2a2a; border-color: #ff2a2a; } }
+                @keyframes pulse-ring {
+                    0%,100% { opacity: 0.6; transform: scale(1); }
+                    50%     { opacity: 1;   transform: scale(1.04); }
+                }
+                @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+                @keyframes slide-up {
+                    from { opacity:0; transform: translateY(8px); }
+                    to   { opacity:1; transform: translateY(0); }
+                }
+                ::-webkit-scrollbar { display:none; }
+                .panel {
+                    background: rgba(255,255,255,0.03);
+                    border: 1px solid rgba(255,255,255,0.08);
+                    border-radius: 4px;
+                    backdrop-filter: blur(8px);
+                    padding: 14px 16px;
+                }
+                .panel-title {
+                    font-size: 10px;
+                    letter-spacing: 0.2em;
+                    opacity: 0.5;
+                    margin-bottom: 10px;
+                    text-transform: uppercase;
+                }
+                .accent-bar {
+                    display: inline-block;
+                    width: 2px; height: 10px;
+                    background: currentColor;
+                    margin-right: 6px;
+                    vertical-align: middle;
+                }
+                .mic-btn {
+                    cursor: pointer;
+                    border-radius: 4px;
+                    padding: 12px 18px;
+                    font-family: inherit;
+                    font-size: 11px;
+                    letter-spacing: 0.18em;
+                    text-transform: uppercase;
+                    transition: all 0.25s ease;
+                    width: 100%;
+                }
+                .mic-btn:hover { filter: brightness(1.25); }
+                .net-line { animation: slide-up 0.3s ease both; }
             `}</style>
 
-            <div className="absolute top-8 left-8 w-[300px] flex flex-col gap-6">
-                <div className="relative border-l-2 border-t-2 border-[#00f3ff] p-4" style={{ clipPath: 'polygon(0 0, 100% 0, 100% calc(100% - 15px), calc(100% - 15px) 100%, 0 100%)' }}>
-                    <div className="text-white mb-2 font-bold tracking-widest">SYS.CPU.MATRIX // {cpuUsage.toFixed(1)}%</div>
-                    <canvas ref={cpuCanvasRef} width={260} height={80} className="w-full h-[80px]" />
+            {/* ── LEFT PANEL ─────────────────────────────────────────────── */}
+            <div style={{ position:'absolute', top:24, left:24, width:260, display:'flex', flexDirection:'column', gap:14 }}>
+
+                {/* CPU */}
+                <div className="panel">
+                    <div className="panel-title" style={{ color: col.primary }}>
+                        <span className="accent-bar" />SYS · CPU MATRIX
+                    </div>
+                    <div style={{ display:'flex', justifyContent:'space-between', marginBottom:6 }}>
+                        <span style={{ color:'#fff', fontSize:11, fontWeight:'bold' }}>{cpuVal.toFixed(1)}%</span>
+                        <span style={{ opacity:0.4, fontSize:10 }}>LOAD AVG</span>
+                    </div>
+                    <canvas ref={cpuCanvasRef} width={228} height={72} style={{ width:'100%', height:72, display:'block' }} />
                 </div>
 
-                <div className="relative border-l-2 border-[#0088ff] p-4 bg-[#0088ff]/5">
-                    <div className="text-white mb-4 font-bold tracking-widest">MEM.BANK.ALLOC // {ramUsage.toFixed(1)} GB / 16.0 GB</div>
-                    <div className="flex gap-1 h-4 w-full">
-                        {Array.from({ length: 20 }).map((_, i) => (
-                            <div key={i} className="flex-1" style={{ backgroundColor: i < (ramUsage / 16) * 20 ? '#00f3ff' : '#00f3ff22', boxShadow: i < (ramUsage / 16) * 20 ? '0 0 5px #00f3ff' : 'none' }} />
+                {/* RAM */}
+                <div className="panel">
+                    <div className="panel-title" style={{ color: col.primary }}>
+                        <span className="accent-bar" />MEM · HEAP ALLOC
+                    </div>
+                    <div style={{ display:'flex', justifyContent:'space-between', marginBottom:8 }}>
+                        <span style={{ color:'#fff', fontSize:11 }}>{ramVal.toFixed(1)} / 16.0 GB</span>
+                        <span style={{ opacity:0.4, fontSize:10 }}>{((ramVal/16)*100).toFixed(0)}%</span>
+                    </div>
+                    <div style={{ display:'flex', gap:2, height:8 }}>
+                        {Array.from({length: 24}).map((_, i) => (
+                            <div key={i} style={{
+                                flex:1, borderRadius:1,
+                                background: i < (ramVal/16)*24 ? col.primary : 'rgba(255,255,255,0.07)',
+                                boxShadow: i < (ramVal/16)*24 ? `0 0 4px ${col.primary}` : 'none',
+                                transition: 'background 0.3s',
+                            }} />
                         ))}
                     </div>
                 </div>
 
-                <div className="relative border-b-2 border-l-2 border-[#00f3ff] p-4 h-[200px] overflow-hidden">
-                    <div className="text-[#0088ff] mb-2 font-bold tracking-widest">NET.STREAM.UPLINK</div>
-                    <div className="flex flex-col justify-end h-[140px] opacity-70">
-                        {networkLog.map((log, i) => <div key={i}>{log}</div>)}
+                {/* Network log */}
+                <div className="panel" style={{ maxHeight:190, overflow:'hidden' }}>
+                    <div className="panel-title" style={{ color: col.primary }}>
+                        <span className="accent-bar" />NET · UPLINK STREAM
+                    </div>
+                    <div style={{ display:'flex', flexDirection:'column', gap:2, fontSize:9, opacity:0.55, fontFamily:'monospace' }}>
+                        {netLog.map((l, i) => (
+                            <div key={i} className="net-line">{l}</div>
+                        ))}
+                    </div>
+                </div>
+
+                {/* WhatsApp status */}
+                <div className="panel">
+                    <div className="panel-title" style={{ color: col.primary }}>
+                        <span className="accent-bar" />WAPP · INTAKE STATUS
+                    </div>
+                    <div style={{ fontSize:10, opacity:0.6, lineHeight:1.8 }}>
+                        STATUS &nbsp;&nbsp;&nbsp; <span style={{ color:'#69ff85' }}>ONLINE</span><br/>
+                        ROUTING &nbsp; <span>ENCRYPTED</span><br/>
+                        SYNC &nbsp;&nbsp;&nbsp;&nbsp; {time.hm}:{time.s}
                     </div>
                 </div>
             </div>
 
-            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] flex items-center justify-center">
-                <div className="absolute w-[500px] h-[500px] rounded-full border border-[#00f3ff]/20" style={{ animation: 'spin-cw 30s linear infinite', borderStyle: 'dashed', borderWidth: '1px' }} />
-                <div className="absolute w-[440px] h-[440px] rounded-full border-2 border-[#0088ff]/40" style={{ animation: 'spin-ccw 20s linear infinite', borderStyle: 'dotted' }} />
-                <div className="absolute w-[360px] h-[360px] rounded-full border-4 border-[#00f3ff]/60" style={{ animation: 'spin-cw 15s linear infinite', borderTopColor: 'transparent', borderBottomColor: 'transparent' }} />
-                <div className="absolute w-[300px] h-[300px] rounded-full border border-[#ffffff]/30" style={{ animation: 'spin-ccw 10s linear infinite', borderStyle: 'dashed', borderWidth: '2px' }} />
-                <div className="absolute w-[220px] h-[220px] rounded-full border-8 border-[#00f3ff]" style={{ animation: 'spin-cw 8s linear infinite', borderLeftColor: 'transparent', borderRightColor: 'transparent', opacity: 0.8, boxShadow: '0 0 30px #00f3ff' }} />
-                
-                <div 
-                    className="absolute w-[120px] h-[120px] rounded-full bg-[#050914] flex flex-col items-center justify-center z-10 border-2"
+            {/* ── CENTRE ORB ─────────────────────────────────────────────── */}
+            <div style={{
+                position:'absolute', top:'50%', left:'50%',
+                transform:'translate(-50%,-50%)',
+                width:520, height:520,
+                display:'flex', alignItems:'center', justifyContent:'center',
+            }}>
+                {/* Rings */}
+                <div style={ringStyle('480px', 40, false, `${col.primary}18`, true)} />
+                <div style={ringStyle('420px', 28, true,  `${col.primary}28`, false)} />
+                <div style={ringStyle('360px', 18, false, `${col.primary}44`, true)} />
+                <div style={{
+                    ...ringStyle('300px', 12, true,  col.primary, false),
+                    borderWidth: 2,
+                    animation: `spin-ccw 12s linear infinite, pulse-ring ${agentState === 'speaking' ? '0.35s' : '3s'} ease-in-out infinite`,
+                }} />
+                <div style={ringStyle('220px', 8, false, col.primary, false)} />
+
+                {/* Core orb */}
+                <div style={{
+                    position:'absolute',
+                    width:130, height:130,
+                    borderRadius:'50%',
+                    background: `radial-gradient(circle at 38% 38%, ${col.primary}22 0%, #020810 70%)`,
+                    border: `2px solid ${col.primary}`,
+                    boxShadow: `0 0 40px ${col.glow}, inset 0 0 20px ${col.glow}`,
+                    display:'flex', flexDirection:'column',
+                    alignItems:'center', justifyContent:'center',
+                    zIndex:10,
+                    transition: 'box-shadow 0.5s, border-color 0.5s',
+                }}>
+                    <div style={{ fontSize:26, fontWeight:'bold', color:'#fff', letterSpacing:2, lineHeight:1 }}>
+                        {time.hm}
+                    </div>
+                    <div style={{ fontSize:13, color: col.primary, opacity:0.8, marginTop:2 }}>
+                        {time.s}<span style={{ opacity:0.5 }}>.{time.ms}</span>
+                    </div>
+                    <div style={{
+                        marginTop:8, fontSize:9, letterSpacing:4,
+                        color: col.primary,
+                        animation: agentState !== 'idle' ? 'blink 1s ease infinite' : 'none',
+                    }}>
+                        {stateLabel}
+                    </div>
+                </div>
+
+                {/* Cross-hairs */}
+                {[
+                    { top:'50%', left:'-8%', width:'16%', height:1 },
+                    { top:'50%', right:'-8%', width:'16%', height:1 },
+                    { left:'50%', top:'-8%', height:'16%', width:1 },
+                    { left:'50%', bottom:'-8%', height:'16%', width:1 },
+                ].map((s, i) => (
+                    <div key={i} style={{ position:'absolute', background:`${col.primary}55`, ...s }} />
+                ))}
+            </div>
+
+            {/* ── RIGHT PANEL ────────────────────────────────────────────── */}
+            <div style={{ position:'absolute', top:24, right:24, width:290, display:'flex', flexDirection:'column', gap:14 }}>
+
+                {/* Mic toggle */}
+                <button
+                    id="mic-toggle-btn"
+                    className="mic-btn"
+                    onClick={toggleMic}
                     style={{
-                        animation: agentState === 'speaking' ? 'pulse-speak 0.2s infinite' : agentState === 'listening' ? 'pulse-core 1s infinite' : 'none',
-                        borderColor: agentState === 'speaking' ? '#ff2a2a' : '#00f3ff'
+                        background: isMicOn ? `${col.primary}18` : 'rgba(255,255,255,0.04)',
+                        border: `1.5px solid ${isMicOn ? col.primary : 'rgba(255,255,255,0.12)'}`,
+                        color: isMicOn ? col.primary : 'rgba(255,255,255,0.4)',
+                        boxShadow: isMicOn ? `0 0 20px ${col.glow}` : 'none',
                     }}
                 >
-                    <div className="text-white text-xl font-bold tracking-widest shadow-[#00f3ff]">{time.split(':')[0]}:{time.split(':')[1]}</div>
-                    <div className="text-[#0088ff] text-xs">{time.split(':')[2]}</div>
-                    <div className="mt-2 text-[10px]" style={{ color: agentState === 'speaking' ? '#ff2a2a' : '#00f3ff' }}>{agentState}</div>
-                </div>
-
-                <div className="absolute top-1/2 -left-20 w-[140px] h-[1px] bg-[#00f3ff]/40" />
-                <div className="absolute top-1/2 -right-20 w-[140px] h-[1px] bg-[#00f3ff]/40" />
-                <div className="absolute -top-20 left-1/2 w-[1px] h-[140px] bg-[#00f3ff]/40" />
-                <div className="absolute -bottom-20 left-1/2 w-[1px] h-[140px] bg-[#00f3ff]/40" />
-            </div>
-
-            <div className="absolute top-8 right-8 w-[360px] flex flex-col gap-6 z-50">
-                <button 
-                    onClick={toggleMic}
-                    className="relative border-2 border-[#00f3ff] p-3 text-center cursor-pointer hover:bg-[#00f3ff]/10 transition-colors"
-                    style={{ borderColor: isMicActive ? '#ff2a2a' : '#00f3ff', boxShadow: isMicActive ? '0 0 15px #ff2a2a' : 'none' }}
-                >
-                    <div className="font-bold tracking-widest" style={{ color: isMicActive ? '#ff2a2a' : '#00f3ff' }}>
-                        {isMicActive ? 'MIC: ACTIVE [WAKEWORD: JARVIS]' : 'MIC: OFFLINE (CLICK TO START)'}
-                    </div>
+                    <span style={{ marginRight:8, animation: isMicOn ? 'blink 1s infinite' : 'none' }}>●</span>
+                    {isMicOn ? 'MIC ACTIVE — WAKEWORD: "JARVIS"' : 'MIC OFFLINE — CLICK TO ACTIVATE'}
                 </button>
 
-                <div className="relative border-r-2 border-t-2 border-[#00f3ff] p-6 min-h-[160px] bg-[#00f3ff]/5" style={{ clipPath: 'polygon(0 0, 100% 0, 100% 100%, 15px 100%, 0 calc(100% - 15px))' }}>
-                    <div className="text-[#0088ff] mb-2 font-bold tracking-widest flex items-center justify-between">
-                        <span>LIVE.TRANSCRIPT // RX</span>
-                        {(agentState === 'speaking' || isMicActive) && <span className="w-2 h-2 rounded-full animate-pulse" style={{ backgroundColor: agentState === 'speaking' ? '#00f3ff' : '#ff2a2a', boxShadow: `0 0 8px ${agentState === 'speaking' ? '#00f3ff' : '#ff2a2a'}` }} />}
+                {/* Transcript */}
+                <div className="panel" style={{ minHeight:160 }}>
+                    <div className="panel-title" style={{ color: col.primary, display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                        <span><span className="accent-bar" />LIVE TRANSCRIPT · RX</span>
+                        {isMicOn && <span style={{ width:6, height:6, borderRadius:'50%', background:'#ff4444', boxShadow:'0 0 8px #ff4444', display:'inline-block', animation:'blink 0.8s infinite' }} />}
                     </div>
-                    <div className="text-white text-sm leading-relaxed" style={{ textShadow: '0 0 5px rgba(255,255,255,0.5)' }}>
-                        {spokenText || '> AWAITING INPUT...'}
+                    <div style={{
+                        color:'#fff',
+                        fontSize: caption ? 12 : 11,
+                        lineHeight: 1.65,
+                        textShadow: `0 0 12px ${col.glow}`,
+                        wordBreak: 'break-word',
+                        transition: 'color 0.3s',
+                    }}>
+                        {displayText}
                     </div>
                 </div>
 
-                <div className="relative border-r-2 border-[#0088ff] p-4 bg-[#050914] z-10" style={{ boxShadow: 'inset -20px 0 20px -20px #0088ff' }}>
-                    <div className="text-[#00f3ff] mb-2 font-bold tracking-widest">WAPP.INTAKE.CONTEXT</div>
-                    <div className="text-[#0088ff]/80 text-xs leading-tight">
-                        STATUS: ONLINE<br/>
-                        ROUTING: ENCRYPTED<br/>
-                        LAST_SYNC: {time}
+                {/* Audio visualiser */}
+                <div className="panel" style={{ padding:'14px 16px 10px' }}>
+                    <div className="panel-title" style={{ color: col.primary }}>
+                        <span className="accent-bar" />FREQ · AUDIO ANALYSIS
+                    </div>
+                    <canvas ref={waveCanvasRef} width={258} height={56} style={{ width:'100%', height:56, display:'block' }} />
+                    <div style={{ display:'flex', justifyContent:'space-between', marginTop:6, fontSize:9, opacity:0.4 }}>
+                        <span>20 Hz</span><span>1 kHz</span><span>16 kHz</span>
                     </div>
                 </div>
-                
-                <div className="relative flex justify-end">
-                    <svg width="200" height="100" viewBox="0 0 200 100" className="opacity-50">
-                        <path d="M 200 0 L 150 0 L 100 50 L 0 50" fill="none" stroke="#00f3ff" strokeWidth="2" />
-                        <circle cx="100" cy="50" r="4" fill="#00f3ff" />
-                        <circle cx="0" cy="50" r="2" fill="#00f3ff" />
-                    </svg>
+
+                {/* Agent state indicator */}
+                <div className="panel">
+                    <div className="panel-title" style={{ color: col.primary }}>
+                        <span className="accent-bar" />JARVIS · AGENT STATE
+                    </div>
+                    <div style={{ display:'flex', gap:8 }}>
+                        {['idle','processing','speaking'].map(s => (
+                            <div key={s} style={{
+                                flex:1, textAlign:'center', padding:'6px 4px',
+                                borderRadius:3,
+                                border: `1px solid ${agentState === s ? STATE_COLORS[s].primary : 'rgba(255,255,255,0.07)'}`,
+                                background: agentState === s ? `${STATE_COLORS[s].primary}18` : 'transparent',
+                                fontSize:9, letterSpacing:'0.12em',
+                                color: agentState === s ? STATE_COLORS[s].primary : 'rgba(255,255,255,0.3)',
+                                transition: 'all 0.3s',
+                                boxShadow: agentState === s ? `0 0 10px ${STATE_COLORS[s].glow}` : 'none',
+                            }}>
+                                {STATE_LABELS[s]}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+
+                {/* Wakeword hint */}
+                <div style={{ textAlign:'center', fontSize:9, opacity:0.28, letterSpacing:'0.15em', lineHeight:1.6 }}>
+                    SAY <span style={{ color: col.primary, opacity:1 }}>"JARVIS, WHAT'S HAPPENING IN [GROUP]?"</span><br/>
+                    TO QUERY YOUR WHATSAPP GROUPS
                 </div>
             </div>
 
-            <div className="absolute bottom-0 left-1/2 -translate-x-1/2 w-[800px] h-[100px] border-t border-[#00f3ff]/20 bg-gradient-to-t from-[#00f3ff]/5 to-transparent flex flex-col items-center justify-end pb-2">
-                <canvas ref={audioCanvasRef} width={760} height={60} className="opacity-80" />
-                <div className="w-full flex justify-between px-6 text-[#0088ff] text-[10px] mt-2 tracking-widest">
-                    <span>FREQ.ANALYSIS</span>
-                    <span>10.02.KHZ</span>
+            {/* ── BOTTOM WAVEFORM BAR ────────────────────────────────────── */}
+            <div style={{
+                position:'absolute', bottom:0, left:0, right:0, height:80,
+                background:'linear-gradient(to top, rgba(0,229,255,0.05) 0%, transparent 100%)',
+                borderTop:`1px solid ${col.primary}22`,
+                display:'flex', flexDirection:'column',
+                alignItems:'center', justifyContent:'flex-end',
+                paddingBottom:10,
+                transition:'border-color 0.5s',
+            }}>
+                <div style={{ width:'65%', display:'flex', justifyContent:'space-between', fontSize:9, opacity:0.3, letterSpacing:'0.18em', marginBottom:4 }}>
+                    <span>JARVIS — WAPP VOICE AGENT</span>
+                    <span>v2.0 · GROQ-POWERED</span>
                 </div>
             </div>
         </div>

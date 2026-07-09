@@ -1,9 +1,14 @@
 @import "tailwindcss";
 
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
 :root {
-  background-color: #000000;
-  color: #ffffff;
-  font-family: 'PPNeueMontreal', 'Inter', system-ui, sans-serif;
+  background-color: #020810;
+  color: #00e5ff;
   margin: 0;
   padding: 0;
   width: 100vw;
@@ -11,13 +16,13 @@
   overflow: hidden;
 }
 
-body {
+html, body {
   margin: 0;
   padding: 0;
   width: 100vw;
   height: 100vh;
-  background-color: #000000;
   overflow: hidden;
+  background-color: #020810;
 }
 
 #root {
@@ -25,17 +30,5 @@ body {
   height: 100vh;
   margin: 0;
   padding: 0;
-  background-color: #000000;
-}
-
-/* Tokens and custom styles */
-@theme {
-  --color-void: #000000;
-  --color-iris: #8052ff;
-  --color-saffron: #ffb829;
-  --color-verdant: #15846e;
-  --color-bone: #ffffff;
-  --color-silver: #bdbdbd;
-
-  --spacing-120: 120px;
+  overflow: hidden;
 }

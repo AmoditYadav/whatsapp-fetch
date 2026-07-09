@@ -74,25 +74,66 @@ def send_state(state, caption=""):
         pass
 
 # ==========================================
-# GROUP MANAGEMENT
+# MESSAGE CACHE  (loaded once, tail-watched)
 # ==========================================
-def get_all_groups():
-    groups = set()
+_messages_cache: list = []
+_cache_file_offset: int = 0
+
+def _bootstrap_cache():
+    """Read entire file once at startup into _messages_cache."""
+    global _messages_cache, _cache_file_offset
     if not os.path.exists(DATA_FILE):
-        return []
+        return
+    _messages_cache = []
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:
                     try:
-                        msg = json.loads(line)
-                        if msg.get("group"):
-                            groups.add(msg["group"].strip())
+                        _messages_cache.append(json.loads(line))
                     except Exception:
                         pass
-    except Exception:
-        pass
+        _cache_file_offset = os.path.getsize(DATA_FILE)
+    except Exception as e:
+        print(f"⚠️ Cache bootstrap error: {e}")
+    print(f"[cache] Loaded {len(_messages_cache)} messages into memory.")
+
+def _refresh_cache():
+    """Append any lines written since the last refresh."""
+    global _cache_file_offset
+    if not os.path.exists(DATA_FILE):
+        return
+    try:
+        current_size = os.path.getsize(DATA_FILE)
+        if current_size <= _cache_file_offset:
+            return
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
+            f.seek(_cache_file_offset)
+            added = 0
+            for line in f:
+                line = line.strip()
+                if line:
+                    try:
+                        _messages_cache.append(json.loads(line))
+                        added += 1
+                    except Exception:
+                        pass
+            _cache_file_offset = f.tell()
+        if added:
+            print(f"[cache] Appended {added} new messages (total: {len(_messages_cache)}).")
+    except Exception as e:
+        print(f"⚠️ Cache refresh error: {e}")
+
+# Bootstrap the cache once at import time
+_bootstrap_cache()
+
+# ==========================================
+# GROUP MANAGEMENT
+# ==========================================
+def get_all_groups():
+    _refresh_cache()
+    groups = {m["group"].strip() for m in _messages_cache if m.get("group")}
     return sorted(groups)
 
 def fuzzy_match_group(query, available_groups):
@@ -111,22 +152,8 @@ def fuzzy_match_group(query, available_groups):
     return None, 0.0
 
 def get_whatsapp_context(group_name, limit=20):
-    if not os.path.exists(DATA_FILE):
-        return []
-    messages = []
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        msg = json.loads(line)
-                        if msg.get("group", "").strip().lower() == group_name.strip().lower():
-                            messages.append(msg)
-                    except Exception:
-                        pass
-    except Exception:
-        return []
+    target = group_name.strip().lower()
+    messages = [m for m in _messages_cache if m.get("group", "").strip().lower() == target]
     messages.sort(key=lambda m: m.get("timestamp", 0))
     return messages[-limit:]
 
@@ -152,7 +179,8 @@ def extract_groups_from_query(transcription, available_groups):
             model="meta-llama/llama-4-scout-17b-16e-instruct",
             messages=[{"role": "user", "content": extraction_prompt}],
             temperature=0.0,
-            max_tokens=50
+            max_tokens=50,
+            timeout=15.0
         )
         raw = completion.choices[0].message.content.strip()
     except Exception as e:
@@ -216,7 +244,8 @@ def generate_response(prompt, group_contexts):
                 {"role": "user", "content": user_prompt}
             ],
             temperature=0.7,
-            max_tokens=200
+            max_tokens=200,
+            timeout=15.0
         )
         return completion.choices[0].message.content
     except Exception as e:
@@ -226,30 +255,39 @@ def generate_response(prompt, group_contexts):
 # TTS — Speak via Piper
 # ==========================================
 def speak(text):
+    import uuid
     print("🗣️  Synthesizing speech locally via Piper TTS...")
     if not os.path.exists(PIPER_PATH):
         print(f"❌ Piper binary not found at '{PIPER_PATH}'")
         return
 
-    output_wav = "output.wav"
+    # Use a unique filename per synthesis to prevent Windows file-locking conflicts
+    output_wav = f"output_{uuid.uuid4().hex[:8]}.wav"
     process = subprocess.Popen(
         [PIPER_PATH, "--model", PIPER_MODEL, "--output_file", output_wav, "--length_scale", "0.9"],
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL
     )
-    process.communicate(input=text.encode('utf-8'))
+    try:
+        process.communicate(input=text.encode('utf-8'), timeout=10)
+    except subprocess.TimeoutExpired:
+        print("❌ Piper TTS synthesis timed out (10s limit).")
+        process.kill()
+        process.communicate()
 
     if os.path.exists(output_wav):
         try:
             data, fs = sf.read(output_wav)
             sd.play(data, fs)
             sd.wait()
+        except Exception as e:
+            print(f"❌ Error playing audio: {e}")
         finally:
             try:
                 os.remove(output_wav)
-            except:
-                pass
+            except Exception as e:
+                print(f"⚠️ Warning: Could not clean up temporary wave file '{output_wav}': {e}")
     else:
         print("❌ Piper failed to generate audio.")
 
@@ -265,31 +303,39 @@ def run_jarvis():
                 resp = requests.get("http://localhost:3000/api/jarvis/command", timeout=2)
                 data = resp.json()
             except Exception:
-                time.sleep(2)
+                time.sleep(1)
                 continue
 
             if not data or not data.get("command"):
-                time.sleep(0.5)
+                time.sleep(0.3)
                 continue
 
             user_text = data["command"]
             print(f"\n➡️  UI Command Received: \"{user_text}\"")
-            send_state("listening")
-
-            available_groups = get_all_groups()
-            group_contexts = extract_groups_from_query(user_text, available_groups)
+            
+            # Send 'processing' state — frontend mic stays off, shows spinner
+            send_state("processing", f"Processing: {user_text}")
 
             try:
+                available_groups = get_all_groups()
+                group_contexts = extract_groups_from_query(user_text, available_groups)
                 response_text = generate_response(user_text, group_contexts)
                 print(f"🤖 Jarvis: {response_text}")
                 
+                # Send 'speaking' state with the caption so the frontend can display it
                 send_state("speaking", response_text)
                 speak(response_text)
             except Exception as e:
+                err_msg = f"Apologies, sir. I encountered a technical difficulty: {e}"
                 print(f"❌ Error during processing: {e}")
+                send_state("speaking", err_msg)
+                try:
+                    speak(err_msg)
+                except Exception:
+                    pass
             finally:
                 # ALWAYS return to idle so the browser microphone unlocks
-                send_state("idle", "AWAITING INPUT...")
+                send_state("idle", "")
 
     except KeyboardInterrupt:
         print("\nFarewell, sir.")
